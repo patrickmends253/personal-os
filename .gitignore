@@ -1,0 +1,11 @@
+# Private project docs — they stay on this PC only and must NOT go to the public repo.
+# (The repo must be public for free GitHub Pages; these files describe the owner's
+# personal life and goals, so they are kept out of the published repository.)
+CLAUDE.md
+project.md
+context.md
+
+# Local tooling and OS noise
+.claude/
+Thumbs.db
+desktop.ini
