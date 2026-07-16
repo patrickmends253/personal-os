@@ -1,37 +1,45 @@
 // Service worker: caches the app shell so the app opens instantly and offline.
 // IMPORTANT: bump CACHE_VERSION whenever any shell file below changes.
-const CACHE_VERSION = 'personal-os-shell-v1';
+const CACHE_VERSION = 'personal-os-shell-v2';
+
+// Same-origin shell files — critical; install fails if any is missing.
 const SHELL = [
   './',
   './index.html',
   './manifest.json',
+  './js/app.js',
+  './js/db.js',
   './icons/icon-192.png',
   './icons/icon-512.png'
 ];
 
+// Cross-origin libs — best-effort so a CDN hiccup can't break the install.
+const EXTRA = [
+  'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm'
+];
+
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_VERSION)
-      .then((cache) => cache.addAll(SHELL))
-      .then(() => self.skipWaiting())
-  );
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE_VERSION);
+    await cache.addAll(SHELL);
+    await Promise.allSettled(EXTRA.map((url) => cache.add(url)));
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches.keys()
-      .then((keys) => Promise.all(
-        keys.filter((key) => key !== CACHE_VERSION).map((key) => caches.delete(key))
-      ))
-      .then(() => self.clients.claim())
-  );
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter((k) => k !== CACHE_VERSION).map((k) => caches.delete(k)));
+    await self.clients.claim();
+  })());
 });
 
 self.addEventListener('fetch', (event) => {
   const request = event.request;
-  if (request.method !== 'GET') return;
+  if (request.method !== 'GET') return; // let Supabase writes (POST etc.) pass straight through
 
-  // Page loads: try the network first (so updates show up), fall back to cache offline.
+  // Page loads: network-first (so updates show up), fall back to the cached shell offline.
   if (request.mode === 'navigate') {
     event.respondWith(
       fetch(request)
@@ -42,28 +50,25 @@ self.addEventListener('fetch', (event) => {
           }
           return response;
         })
-        .catch(() =>
-          caches.match(request).then((cached) => cached || caches.match('./'))
-        )
+        .catch(() => caches.match(request).then((c) => c || caches.match('./index.html')))
     );
     return;
   }
 
-  // Everything else same-origin: serve from cache instantly, refresh it in the background.
-  if (new URL(request.url).origin === self.location.origin) {
-    event.respondWith(
-      caches.match(request).then((cached) => {
-        const fresh = fetch(request)
-          .then((response) => {
-            if (response.ok) {
-              const copy = response.clone();
-              caches.open(CACHE_VERSION).then((cache) => cache.put(request, copy));
-            }
-            return response;
-          })
-          .catch(() => cached);
-        return cached || fresh;
-      })
-    );
-  }
+  // Everything else: serve from cache if we have it (covers the CDN lib offline),
+  // otherwise go to the network and cache same-origin responses for next time.
+  event.respondWith(
+    caches.match(request).then((cached) => {
+      const network = fetch(request)
+        .then((response) => {
+          if (response.ok && new URL(request.url).origin === self.location.origin) {
+            const copy = response.clone();
+            caches.open(CACHE_VERSION).then((cache) => cache.put(request, copy));
+          }
+          return response;
+        })
+        .catch(() => cached);
+      return cached || network;
+    })
+  );
 });
