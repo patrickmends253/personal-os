@@ -1,46 +1,77 @@
-// Entry point: the auth gate + the temporary sync smoke-test.
-// (This is a minimal proto-router. The real module router / module contract lands
-//  with the Tasks module in step 4 — see project.md §3.)
+// Shell: auth gate, theme, and the module router.
+//
+// MODULE CONTRACT (see project.md §3):
+//   Each file in js/modules/ default-exports { id, title, mount(container, ctx), unmount() }.
+//   ctx = { supabase, session }. Modules render only inside the container they are given
+//   and clean up after themselves in unmount(). The shell knows nothing else about them.
+//   Adding a future section = one new file below in MODULES + one line in the nav.
+
+const MODULES = {
+  tasks: () => import('./modules/tasks.js'),
+};
+const DEFAULT_MODULE = 'tasks';
 
 const body = document.body;
-const setView = (v) => { body.dataset.view = v; };
-const IS_MOBILE = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-const DEVICE = IS_MOBILE ? 'Telemóvel' : 'Computador';
-
-// --- elements ---
 const el = (id) => document.getElementById(id);
-const loginForm = el('login-form');
-const emailInput = el('email');
-const passwordInput = el('password');
-const loginBtn = el('login-btn');
-const authMsg = el('auth-msg');
-const netChip = el('net');
-const syncInput = el('sync-input');
-const syncSave = el('sync-save');
-const syncStatus = el('sync-status');
-const userEmail = el('user-email');
-const signoutBtn = el('signout');
+const setView = (v) => { body.dataset.view = v; };
 
-// --- static UI (works with or without a connection) ---
-function paintGreeting() {
-  const h = new Date().getHours();
-  el('greet').textContent = h < 12 ? 'Bom dia.' : h < 20 ? 'Boa tarde.' : 'Boa noite.';
+// --- theme: dark (A) / paper (B) / soft (D), cycled; remembered per device ---
+const THEMES = ['dark', 'paper', 'soft'];
+const THEME_BG = { dark: '#0F141C', paper: '#F3EEE3', soft: '#EEF1F6' };
+
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  document.querySelector('meta[name="theme-color"]').setAttribute('content', THEME_BG[t]);
+  localStorage.setItem('pos-theme', t);
 }
-function paintDate() {
-  const d = new Date().toLocaleDateString('pt-PT', { weekday: 'long', day: 'numeric', month: 'long' });
-  el('date').textContent = d.charAt(0).toUpperCase() + d.slice(1);
+function initTheme() {
+  const saved = localStorage.getItem('pos-theme');
+  if (saved && THEMES.includes(saved)) return applyTheme(saved);
+  applyTheme(matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'paper');
 }
+el('theme-btn').addEventListener('click', () => {
+  const cur = document.documentElement.dataset.theme;
+  applyTheme(THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length]);
+});
+initTheme();
+
+// --- online/offline chip ---
+const netChip = el('net');
 function paintNet() {
   netChip.textContent = navigator.onLine ? 'online' : 'offline';
   netChip.classList.toggle('off', !navigator.onLine);
 }
+addEventListener('online', paintNet);
+addEventListener('offline', paintNet);
+paintNet();
 
-// --- register the service worker (cached shell → opens instantly / offline) ---
+// --- service worker ---
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js').catch(() => {});
 }
 
-// --- login error → plain Portuguese ---
+// --- module router ---
+const viewContainer = el('view');
+let active = null; // { id, mod }
+
+async function mountModule(id, ctx) {
+  if (active?.id === id) return;
+  if (active) { try { active.mod.unmount(); } catch {} }
+  viewContainer.innerHTML = '';
+  const { default: mod } = await MODULES[id]();
+  active = { id, mod };
+  await mod.mount(viewContainer, ctx);
+}
+function unmountModule() {
+  if (active) { try { active.mod.unmount(); } catch {} }
+  active = null;
+  viewContainer.innerHTML = '';
+}
+
+// --- auth gate ---
+const authMsg = el('auth-msg');
+const loginBtn = el('login-btn');
+
 function loginErrorPT(message = '') {
   if (/invalid login credentials/i.test(message)) return 'Email ou palavra-passe incorretos.';
   if (/email not confirmed/i.test(message)) return 'Confirma o teu email antes de entrar.';
@@ -48,90 +79,39 @@ function loginErrorPT(message = '') {
   return 'Não foi possível entrar. Tenta de novo.';
 }
 
-// --- sync smoke-test ---
 let supabase = null;
-let userId = null;
+let currentUserId = null;
 
-async function loadSync() {
-  if (!supabase || !userId) return;
-  const { data, error } = await supabase
-    .from('sync_test')
-    .select('content, device, updated_at')
-    .eq('user_id', userId)
-    .maybeSingle();
-
-  if (error) { syncStatus.textContent = 'Não foi possível ler os dados.'; return; }
-  if (!data) { syncStatus.textContent = 'Ainda nada guardado.'; return; }
-
-  const when = new Date(data.updated_at).toLocaleString('pt-PT',
-    { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-  syncStatus.innerHTML =
-    `Última gravação: <b>${escapeHtml(data.content || '(vazio)')}</b><br>` +
-    `via ${escapeHtml(data.device || '?')} · ${when}`;
-}
-
-async function saveSync() {
-  if (!supabase || !userId) return;
-  syncSave.disabled = true;
-  const { error } = await supabase.from('sync_test').upsert({
-    user_id: userId,
-    content: syncInput.value.trim(),
-    device: DEVICE,
-    updated_at: new Date().toISOString(),
-  });
-  syncSave.disabled = false;
-  if (error) { syncStatus.textContent = 'Não foi possível guardar.'; return; }
-  syncInput.value = '';
-  loadSync();
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-
-// --- session state ---
 function enterApp(session) {
-  userId = session.user.id;
-  userEmail.textContent = session.user.email || '';
+  if (currentUserId === session.user.id && active) return;
+  currentUserId = session.user.id;
+  el('user-email').textContent = session.user.email || '';
   setView('app');
-  loadSync();
+  mountModule(DEFAULT_MODULE, { supabase, session });
 }
 function leaveApp() {
-  userId = null;
+  currentUserId = null;
+  unmountModule();
   setView('auth');
 }
 
-// --- boot ---
 (async () => {
-  paintGreeting();
-  paintDate();
-  paintNet();
-  window.addEventListener('online', paintNet);
-  window.addEventListener('offline', paintNet);
-
-  // wire DOM once (safe regardless of auth state)
-  loginForm.addEventListener('submit', async (e) => {
+  el('login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     if (!supabase) { authMsg.textContent = loginErrorPT('network'); return; }
     authMsg.textContent = '';
     loginBtn.disabled = true;
     loginBtn.textContent = 'A entrar…';
     const { error } = await supabase.auth.signInWithPassword({
-      email: emailInput.value.trim(),
-      password: passwordInput.value,
+      email: el('email').value.trim(),
+      password: el('password').value,
     });
     loginBtn.disabled = false;
     loginBtn.textContent = 'Entrar';
     if (error) authMsg.textContent = loginErrorPT(error.message);
-    // success is handled by onAuthStateChange
   });
-  syncSave.addEventListener('click', saveSync);
-  syncInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveSync(); });
-  signoutBtn.addEventListener('click', () => supabase && supabase.auth.signOut());
-  window.addEventListener('focus', loadSync); // re-check for changes from other devices
+  el('signout').addEventListener('click', () => supabase && supabase.auth.signOut());
 
-  // load Supabase (may fail offline — degrade gracefully instead of white-screening)
   try {
     ({ supabase } = await import('./db.js'));
   } catch {
