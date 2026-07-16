@@ -50,6 +50,32 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js').catch(() => {});
 }
 
+// --- install ---
+// Chrome fires beforeinstallprompt ONLY when it accepts the site as installable, so the
+// button appearing is itself the proof. Going through this event installs a real app
+// (a WebAPK on Android); the browser menu's "add to home screen" can instead make a
+// bookmark shortcut, which is what leaves the Chrome badge on the icon.
+const installBtn = el('install-btn');
+let installEvent = null;
+
+addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault(); // keep Chrome's own banner from firing; we prompt from the button
+  installEvent = e;
+  installBtn.hidden = false;
+});
+
+installBtn.addEventListener('click', async () => {
+  if (!installEvent) return;
+  installBtn.disabled = true;
+  installEvent.prompt();
+  await installEvent.userChoice; // resolves whether he installs or dismisses
+  installEvent = null;           // the event is single-use
+  installBtn.hidden = true;
+  installBtn.disabled = false;
+});
+
+addEventListener('appinstalled', () => { installEvent = null; installBtn.hidden = true; });
+
 // --- module router ---
 const viewContainer = el('view');
 let active = null; // { id, mod }

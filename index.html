@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0F141C">
+  <meta name="mobile-web-app-capable" content="yes">
   <title>Personal OS</title>
   <link rel="manifest" href="manifest.json">
   <link rel="icon" type="image/png" href="icons/icon-192.png">
@@ -128,6 +129,12 @@
       background: none; border: 1px solid var(--line); color: var(--muted);
       border-radius: 999px; width: 30px; height: 30px; font-size: 0.95rem; line-height: 1;
     }
+    /* Shown only when Chrome offers a real install (see beforeinstallprompt in app.js). */
+    .installbtn {
+      background: var(--accent); color: var(--accent-ink); border: none;
+      border-radius: 999px; padding: 7px 13px; font-size: 0.76rem; font-weight: 650;
+    }
+    [hidden] { display: none !important; }
 
     #view { flex: 1; display: flex; flex-direction: column; }
 
@@ -265,6 +272,7 @@
     <div class="wrap">
       <header>
         <div class="wordmark">Personal <b>OS</b></div>
+        <button class="installbtn" id="install-btn" type="button" hidden>Instalar</button>
         <button class="iconbtn" id="theme-btn" type="button" title="Mudar tema">◐</button>
         <div class="chip" id="net">online</div>
       </header>
