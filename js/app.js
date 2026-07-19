@@ -8,6 +8,7 @@
 
 const MODULES = {
   tasks: () => import('./modules/tasks.js'),
+  board: () => import('./modules/board.js'),
 };
 const DEFAULT_MODULE = 'tasks';
 
@@ -78,16 +79,28 @@ addEventListener('appinstalled', () => { installEvent = null; installBtn.hidden 
 
 // --- module router ---
 const viewContainer = el('view');
+const nav = el('nav');
 let active = null; // { id, mod }
+
+function paintNav(id) {
+  nav.querySelectorAll('[data-mod]').forEach((b) => b.classList.toggle('on', b.dataset.mod === id));
+}
 
 async function mountModule(id, ctx) {
   if (active?.id === id) return;
   if (active) { try { active.mod.unmount(); } catch {} }
   viewContainer.innerHTML = '';
+  paintNav(id);
   const { default: mod } = await MODULES[id]();
   active = { id, mod };
   await mod.mount(viewContainer, ctx);
 }
+
+// Nav switches modules; ctx is captured from the live session (set in enterApp).
+nav.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-mod]');
+  if (btn && currentSession) mountModule(btn.dataset.mod, { supabase, session: currentSession });
+});
 function unmountModule() {
   if (active) { try { active.mod.unmount(); } catch {} }
   active = null;
@@ -107,8 +120,10 @@ function loginErrorPT(message = '') {
 
 let supabase = null;
 let currentUserId = null;
+let currentSession = null; // kept so nav can re-mount modules with a fresh ctx
 
 function enterApp(session) {
+  currentSession = session;
   if (currentUserId === session.user.id && active) return;
   currentUserId = session.user.id;
   el('user-email').textContent = session.user.email || '';
@@ -117,6 +132,7 @@ function enterApp(session) {
 }
 function leaveApp() {
   currentUserId = null;
+  currentSession = null;
   unmountModule();
   setView('auth');
 }

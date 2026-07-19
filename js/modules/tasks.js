@@ -26,6 +26,7 @@ let comps = [];
 let expandedId = null;
 let subTarget = 'today'; // where a new subtask goes: 'today' | 'tomorrow'
 let loadError = false;
+let todayWon = null;     // does today have a day_wins row? (Progresso board reads it) — null until loaded
 
 let focusHandler = null;
 
@@ -75,20 +76,39 @@ function unmount() {
 async function refresh() {
   const today = todayStr();
   const tomorrow = tomorrowStr();
-  const [t, s, c] = await Promise.all([
+  const [t, s, c, w] = await Promise.all([
     db.from('tasks').select('*').order('position').order('created_at'),
     db.from('subtasks').select('*')
       .or(`for_date.is.null,for_date.eq.${today},for_date.eq.${tomorrow}`)
       .order('position').order('created_at'),
     db.from('task_completions').select('*').gte('done_on', mondayStr()),
+    db.from('day_wins').select('won_on').eq('won_on', today).maybeSingle(),
   ]);
   loadError = !!(t.error || s.error || c.error);
   if (!loadError) {
     tasks = t.data;
     subs = s.data;
     comps = c.data;
+    todayWon = !!w.data; // a missing row (not an error) means today isn't won yet
   }
   render();
+}
+
+// A day counts as "won" when the plate ends the day cleared AND something was actually
+// done today — so the Progresso heatmap only lights up days you truly closed out. We keep
+// today's row in sync as tasks are checked/reopened; earlier days are never touched here.
+async function maintainDayWin() {
+  if (loadError || !db || todayWon === null) return;
+  const { open, done } = visibleLists();
+  const desired = tasks.length > 0 && open.length === 0 && done.length > 0;
+  if (desired === todayWon) return;
+  todayWon = desired; // optimistic: flip first so re-renders don't re-fire the write
+  if (desired) {
+    await db.from('day_wins')
+      .upsert({ user_id: uid, won_on: todayStr() }, { onConflict: 'user_id,won_on', ignoreDuplicates: true });
+  } else {
+    await db.from('day_wins').delete().eq('won_on', todayStr());
+  }
 }
 
 // ---------- derived state ----------
@@ -282,6 +302,7 @@ function render() {
          <div class="rows">${done.map((x) => rowHtml(x, true)).join('')}</div>` : ''}
     <button class="fab" data-act="sheet">+</button>
   `;
+  maintainDayWin(); // fire-and-forget; only writes when today's win state actually changes
 }
 
 // ---------- data actions ----------

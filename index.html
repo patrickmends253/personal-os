@@ -147,6 +147,17 @@
       font-size: 0.8rem; text-decoration: underline; padding: 4px;
     }
 
+    /* ---- module nav (segmented control under the header) ---- */
+    .nav {
+      display: flex; gap: 4px; margin-top: 16px; padding: 4px;
+      background: var(--card2); border: 1px solid var(--line); border-radius: 13px;
+    }
+    .navbtn {
+      flex: 1; background: none; border: none; color: var(--muted);
+      border-radius: 10px; padding: 9px 12px; font-size: 0.9rem; font-weight: 600;
+    }
+    .navbtn.on { background: var(--card); color: var(--text); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12); }
+
     /* ---- tasks module (styles live in the shell stylesheet for v1 simplicity) ---- */
     .greet { margin-top: 26px; }
     .greet h1 { font-size: clamp(2rem, 8vw, 2.7rem); font-weight: 650; letter-spacing: -0.02em; line-height: 1.1; }
@@ -221,6 +232,47 @@
 
     .empty { color: var(--muted); font-size: 0.92rem; line-height: 1.5; padding: 8px 0 4px; }
 
+    /* ---- progresso board ---- */
+    .stats { display: flex; gap: 10px; margin-top: 22px; }
+    .stat {
+      flex: 1; background: var(--card2); border: 1px solid var(--line);
+      border-radius: 16px; padding: 16px 14px; text-align: center;
+    }
+    .stat-n { font-size: 1.9rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1; }
+    .stat-l { color: var(--muted); font-size: 0.74rem; margin-top: 7px; line-height: 1.3; }
+
+    .hm-scroll { overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }
+    .hm { display: flex; gap: 8px; min-width: min-content; }
+    .hm-wd {
+      display: grid; grid-template-rows: repeat(7, 12px); gap: 3px;
+      align-content: start; padding-top: 18px; /* clears the month row */
+    }
+    .hm-wd span {
+      grid-row: span 2; font-size: 0.62rem; color: var(--muted); line-height: 12px;
+    }
+    .hm-wd span:last-child { grid-row: span 3; }
+    .hm-body { display: flex; flex-direction: column; gap: 4px; }
+    .hm-months {
+      display: grid; grid-template-columns: repeat(var(--cols), 12px); gap: 3px;
+      height: 14px;
+    }
+    .hm-m { font-size: 0.62rem; color: var(--muted); white-space: nowrap; line-height: 14px; }
+    .hm-grid {
+      display: grid; grid-template-rows: repeat(7, 12px);
+      grid-auto-flow: column; grid-auto-columns: 12px; gap: 3px;
+    }
+    .hm-c { width: 12px; height: 12px; border-radius: 3px; background: var(--line); }
+    .hm-c.won { background: var(--accent); }
+    .hm-c.future { background: transparent; }
+    .hm-c.today { box-shadow: 0 0 0 1.5px var(--accent); }
+    .hm-c.won.today { box-shadow: 0 0 0 1.5px var(--text); }
+    .hm-legend {
+      display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+      color: var(--muted); font-size: 0.76rem; margin-top: 12px;
+    }
+    .hm-key { display: inline-flex; align-items: center; gap: 5px; }
+    .hm-key .hm-c { width: 11px; height: 11px; }
+
     .fab {
       position: fixed; right: 20px; bottom: calc(env(safe-area-inset-bottom) + 20px);
       width: 56px; height: 56px; border-radius: 50%; border: none;
@@ -276,6 +328,10 @@
         <button class="iconbtn" id="theme-btn" type="button" title="Mudar tema">◐</button>
         <div class="chip" id="net">online</div>
       </header>
+      <nav class="nav" id="nav">
+        <button class="navbtn on" type="button" data-mod="tasks">Hoje</button>
+        <button class="navbtn" type="button" data-mod="board">Progresso</button>
+      </nav>
       <div id="view"></div>
       <footer>
         <span id="user-email"></span>
