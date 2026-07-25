@@ -266,66 +266,80 @@ function rowMeta(t, st) {
   return bits.length ? `<span class="tsub">${bits.join('')}</span>` : '';
 }
 
-// A recurring task's subtasks live in buckets by date: today's plan, later (tomorrow and
-// beyond), leftovers (dated before today and still undone), and the undated backlog
-// ("quando puder"). A one-off task has no days, so it just keeps one flat checklist.
-function subBuckets(t) {
+// Hoje / Amanhã / Quando puder are three SEPARATE lists, not sections of one list: the
+// tab you are on is both what you see and where a new subtask lands. A one-off task has
+// no days at all, so it keeps a single flat checklist and shows no tabs.
+const SUB_TABS = [['today', 'Hoje'], ['tomorrow', 'Amanhã'], ['none', 'Quando puder']];
+
+function subBucket(t, tab) {
   const today = todayStr();
   const mine = subs.filter((s) => s.task_id === t.id);
-  if (t.cadence === 'once') return { plan: mine, later: [], left: [], someday: [] };
-  return {
-    plan: mine.filter((s) => s.for_date === today),
-    later: mine.filter((s) => s.for_date > today),
-    left: mine.filter((s) => s.for_date && s.for_date < today && !s.done),
-    someday: mine.filter((s) => !s.for_date),
-  };
+  if (t.cadence === 'once') return mine;
+  if (tab === 'none') return mine.filter((s) => !s.for_date);
+  if (tab === 'tomorrow') return mine.filter((s) => s.for_date > today);
+  return mine.filter((s) => s.for_date === today);
 }
 
-function subLine(s, { check = true, move = false } = {}) {
+// Planned for a past day and never done. Kept out of the tabs (they belong to no day any
+// more) but shown under today's list, because that is where he would act on them — §8
+// says leftovers must not silently roll into today, but they must not vanish either.
+function subLeftovers(t) {
+  if (t.cadence === 'once') return [];
+  return subs.filter((s) => s.task_id === t.id && s.for_date && s.for_date < todayStr() && !s.done);
+}
+
+function subLine(s, { check = true, move = false, day = '' } = {}) {
   return `<div class="subrow ${s.done ? 'sdone' : ''}">
     ${check
       ? `<button class="cb ${s.done ? 'on' : ''}" data-act="toggle-sub" data-id="${s.id}">✓</button>`
       : ''}
     <span class="st"${check ? '' : ' style="color:var(--muted)"'}>${esc(s.title)}</span>
+    ${day ? `<span class="tag">${day}</span>` : ''}
     ${move ? `<button class="xbtn move" data-act="sub-to-today" data-id="${s.id}" title="Trazer para hoje">↑ hoje</button>` : ''}
     <button class="xbtn" data-act="del-sub" data-id="${s.id}">×</button>
   </div>`;
 }
 
 function expandHtml(t, st) {
-  const b = subBuckets(t);
-  const dayLabel = (d) => d === tomorrowStr() ? 'amanhã'
-    : new Date(d + 'T00:00:00').toLocaleDateString('pt-PT', { day: 'numeric', month: 'short' });
+  const tabbed = t.cadence !== 'once';
+  const tab = tabbed ? subTarget : 'today';
+  const list = subBucket(t, tab);
+  // anything dated past tomorrow keeps its day visible inside the Amanhã tab
+  const dayOf = (s) => tab === 'tomorrow' && s.for_date !== tomorrowStr()
+    ? new Date(s.for_date + 'T00:00:00').toLocaleDateString('pt-PT', { day: 'numeric', month: 'short' })
+    : '';
 
   let h = '<div class="expand">';
-  h += b.plan.map((s) => subLine(s)).join('');
+  if (tabbed) {
+    h += `<div class="pills subwhen">
+      ${SUB_TABS.map(([v, label]) => {
+        const n = subBucket(t, v).length;
+        return `<button class="pill ${tab === v ? 'on' : ''}" data-act="sub-target" data-v="${v}">${label}${n ? ` <b>${n}</b>` : ''}</button>`;
+      }).join('')}
+    </div>`;
+  }
 
-  if (b.left.length) {
-    h += `<div class="subhead">Por acabar</div>`;
-    h += b.left.map((s) => subLine(s, { check: false, move: true })).join('');
-  }
-  if (b.later.length) {
-    h += `<div class="subhead">Mais tarde</div>`;
-    h += b.later.map((s) =>
-      subLine(s, { check: false, move: true }).replace('</span>',
-        `</span><span class="tag">${dayLabel(s.for_date)}</span>`)).join('');
-  }
-  if (b.someday.length) {
-    h += `<div class="subhead">Quando puder</div>`;
-    h += b.someday.map((s) => subLine(s, { check: false, move: true })).join('');
+  h += list.length
+    ? list.map((s) => subLine(s, { check: tab === 'today', move: tabbed && tab !== 'today', day: dayOf(s) })).join('')
+    : `<div class="subempty">${!tabbed ? 'Sem passos ainda.'
+        : tab === 'today' ? 'Nada planeado para hoje.'
+        : tab === 'tomorrow' ? 'Nada para amanhã.' : 'Nada na lista.'}</div>`;
+
+  if (tab === 'today') {
+    const left = subLeftovers(t);
+    if (left.length) {
+      h += `<div class="subhead">Por acabar de dias anteriores</div>`;
+      h += left.map((s) => subLine(s, { check: false, move: true })).join('');
+    }
   }
 
   h += `<div class="addsub">
-    <input class="field" id="addsub-input" placeholder="Nova subtarefa…" autocomplete="off">
+    <input class="field" id="addsub-input" placeholder="${
+      !tabbed ? 'Novo passo…'
+      : tab === 'today' ? 'Nova subtarefa para hoje…'
+      : tab === 'tomorrow' ? 'Nova subtarefa para amanhã…' : 'Nova subtarefa, quando puder…'}" autocomplete="off">
     <button class="pill on" data-act="add-sub" data-id="${t.id}">+</button>
   </div>`;
-  // A one-off task has no "today" — its checklist is simply the task's steps.
-  if (t.cadence !== 'once') {
-    h += `<div class="pills subwhen">
-      ${[['today', 'Hoje'], ['tomorrow', 'Amanhã'], ['none', 'Quando puder']].map(([v, label]) =>
-        `<button class="pill ${subTarget === v ? 'on' : ''}" data-act="sub-target" data-v="${v}">${label}</button>`).join('')}
-    </div>`;
-  }
   h += `<div class="rowactions">
     <button class="ghostbtn" data-act="rename" data-id="${t.id}">Mudar nome</button>
     ${t.cadence === 'once' ? `<button class="ghostbtn" data-act="redate" data-id="${t.id}">Mudar data</button>` : ''}
@@ -703,9 +717,13 @@ function onClick(e) {
   else if (act === 'toggle-task') toggleTask(task);
   else if (act === 'toggle-sub') toggleSub(id);
   else if (act === 'sub-target') {
+    // the tab now decides what is listed, so this has to re-render — carry any half-typed
+    // subtask across so switching tabs doesn't eat what he was writing
+    const typed = root.querySelector('#addsub-input')?.value || '';
     subTarget = btn.dataset.v;
-    btn.parentElement.querySelectorAll('[data-act="sub-target"]').forEach((p) =>
-      p.classList.toggle('on', p.dataset.v === subTarget));
+    render();
+    const input = root.querySelector('#addsub-input');
+    if (input && typed) { input.value = typed; input.focus(); }
   }
   else if (act === 'add-sub') {
     const input = root.querySelector('#addsub-input');

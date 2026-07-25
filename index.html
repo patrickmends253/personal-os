@@ -246,8 +246,11 @@
     /* "↑ hoje" — pulls a leftover / backlog / future step into today's plan */
     .xbtn.move { color: var(--accent); font-size: 0.74rem; padding: 4px 6px; white-space: nowrap; }
     .subrow .tag { flex: none; }
-    /* where a new subtask lands: hoje / amanhã / quando puder */
+    /* tabs: each one is a separate list, and where a new subtask lands */
+    .subwhen { margin-bottom: 2px; }
     .subwhen .pill { padding: 5px 11px; font-size: 0.78rem; }
+    .subwhen .pill b { font-weight: 650; opacity: 0.75; margin-left: 2px; }
+    .subempty { color: var(--muted); font-size: 0.85rem; padding: 2px 0; }
     .addsub { display: flex; gap: 8px; align-items: center; }
     .addsub .field { padding: 9px 12px; font-size: 0.9rem; border-radius: 10px; flex: 1; }
     .pill {
