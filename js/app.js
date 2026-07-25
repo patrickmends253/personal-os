@@ -47,6 +47,8 @@ addEventListener('offline', paintNet);
 paintNet();
 
 // --- service worker ---
+// Registered only to keep the app installable (Chrome requires a worker with a fetch
+// handler before it offers a real install). It caches nothing — see sw.js.
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js').catch(() => {});
 }
