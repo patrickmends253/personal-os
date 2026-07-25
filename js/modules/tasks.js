@@ -28,6 +28,10 @@ let subTarget = 'today'; // where a new subtask goes: 'today' | 'tomorrow'
 let loadError = false;
 let todayWon = null;     // does today have a day_wins row? (Progresso board reads it) — null until loaded
 
+let drag = null;        // active drag gesture (see startDrag)
+let dragEndedAt = 0;    // so the click after a drag doesn't expand a row
+let toastTimer = null;
+
 let focusHandler = null;
 
 // ---------- dates (device-local; one user, one timezone) ----------
@@ -47,13 +51,41 @@ function esc(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// ---------- saving ----------
+// A Supabase query builder is LAZY: the request is only sent when the builder is
+// awaited (fetch lives inside its .then()). A fire-and-forget `db.from(...).delete()`
+// therefore does nothing at all — which is why deleted rows used to come back on the
+// next refresh. Every write goes through here so it is both sent and checked.
+async function save(query) {
+  const { error } = await query;
+  if (!error) return true;
+  console.error('[tasks] write failed', error);
+  toast('Não foi possível guardar. Tenta de novo.');
+  await refresh();
+  return false;
+}
+
+function toast(msg) {
+  let el = document.getElementById('pos-toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'pos-toast';
+    el.className = 'toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  requestAnimationFrame(() => el.classList.add('on'));
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('on'), 2800);
+}
+
 // ---------- lifecycle ----------
 async function mount(container, ctx) {
   root = container;
   db = ctx.supabase;
   uid = ctx.session.user.id;
   expandedId = null;
-  focusHandler = () => refresh();
+  focusHandler = () => { if (!drag) refresh(); };
   window.addEventListener('focus', focusHandler);
   root.addEventListener('click', onClick);
   root.addEventListener('pointerdown', onPointerDown);
@@ -63,6 +95,8 @@ async function mount(container, ctx) {
 }
 
 function unmount() {
+  endDrag(true);
+  document.getElementById('pos-toast')?.remove();
   window.removeEventListener('focus', focusHandler);
   if (root) {
     root.removeEventListener('click', onClick);
@@ -278,7 +312,7 @@ function rowHtml({ t, st }, isDone) {
 }
 
 function render() {
-  if (!root) return;
+  if (!root || drag) return; // never rebuild the DOM under a finger mid-drag
   const { open, done } = visibleLists();
   const h = new Date().getHours();
   const greet = h < 12 ? 'Bom dia.' : h < 20 ? 'Boa tarde.' : 'Boa noite.';
@@ -311,17 +345,18 @@ async function toggleTask(t) {
   if (t.cadence === 'once') {
     const v = t.completed_at ? null : new Date().toISOString();
     t.completed_at = v; render();
-    await db.from('tasks').update({ completed_at: v }).eq('id', t.id);
+    await save(db.from('tasks').update({ completed_at: v }).eq('id', t.id));
   } else {
     const existing = comps.find((c) => c.task_id === t.id && c.done_on === today);
     if (existing) {
       comps = comps.filter((c) => c !== existing); render();
-      await db.from('task_completions').delete().eq('id', existing.id);
+      await save(db.from('task_completions').delete().eq('id', existing.id));
     } else {
       const row = { user_id: uid, task_id: t.id, done_on: today };
       comps.push(row); render();
-      const { data } = await db.from('task_completions').insert(row).select().single();
-      if (data) Object.assign(row, data);
+      const { data, error } = await db.from('task_completions').insert(row).select().single();
+      if (error) { toast('Não foi possível guardar. Tenta de novo.'); await refresh(); }
+      else if (data) Object.assign(row, data);
     }
   }
 }
@@ -329,7 +364,7 @@ async function toggleTask(t) {
 async function toggleSub(id) {
   const s = subs.find((x) => x.id === id);
   s.done = !s.done; render();
-  await db.from('subtasks').update({ done: s.done }).eq('id', id);
+  await save(db.from('subtasks').update({ done: s.done }).eq('id', id));
   // a one-off block completes itself when its last subtask is checked
   const t = tasks.find((x) => x.id === s.task_id);
   if (t && t.cadence === 'once') {
@@ -338,24 +373,26 @@ async function toggleSub(id) {
     const v = allDone ? (t.completed_at || new Date().toISOString()) : null;
     if ((t.completed_at || null) !== v) {
       t.completed_at = v; render();
-      await db.from('tasks').update({ completed_at: v }).eq('id', t.id);
+      await save(db.from('tasks').update({ completed_at: v }).eq('id', t.id));
     }
   }
 }
 
-async function addSub(taskId, title) {
+async function addSub(taskId, title, target = subTarget) {
   const t = tasks.find((x) => x.id === taskId);
-  const for_date = t.cadence === 'daily' ? (subTarget === 'today' ? todayStr() : tomorrowStr()) : null;
+  const for_date = t.cadence === 'daily' ? (target === 'today' ? todayStr() : tomorrowStr()) : null;
   const position = subs.filter((s) => s.task_id === taskId).length;
-  const { data } = await db.from('subtasks')
+  const { data, error } = await db.from('subtasks')
     .insert({ user_id: uid, task_id: taskId, title, for_date, position }).select().single();
-  if (data) subs.push(data);
+  if (error) { toast('Não foi possível guardar. Tenta de novo.'); await refresh(); return null; }
+  subs.push(data);
   // adding a subtask reopens a completed one-off block
   if (t.cadence === 'once' && t.completed_at) {
     t.completed_at = null;
-    await db.from('tasks').update({ completed_at: null }).eq('id', t.id);
+    await save(db.from('tasks').update({ completed_at: null }).eq('id', t.id));
   }
   render();
+  return data;
 }
 
 async function persistOrder(orderedIds) {
@@ -368,7 +405,7 @@ async function persistOrder(orderedIds) {
     const t = byId.get(id);
     if (t.position !== slots[i]) {
       t.position = slots[i];
-      updates.push(db.from('tasks').update({ position: slots[i] }).eq('id', id));
+      updates.push(save(db.from('tasks').update({ position: slots[i] }).eq('id', id)));
     }
   });
   tasks.sort((a, b) => a.position - b.position || (a.created_at < b.created_at ? -1 : 1));
@@ -376,34 +413,145 @@ async function persistOrder(orderedIds) {
   await Promise.all(updates);
 }
 
-// ---------- drag to reorder (pointer events on the ≡ handle) ----------
+// ---------- drag the ≡ handle: reorder, or drop onto a task to nest ----------
+//
+// Nothing is moved in the DOM while the finger is down. The row follows the pointer
+// with a transform and the others slide to open a gap; the real list is rebuilt only
+// on drop. That matters on touch: a pointerdown implicitly captures the pointer to the
+// handle, and re-inserting the handle's row in the DOM releases that capture — which is
+// exactly why the old version stopped receiving pointermove and appeared frozen.
+
 function startDrag(e, handle) {
-  e.preventDefault();
   const row = handle.closest('.row');
   const list = root.querySelector('#open-rows');
-  if (!row || !list) return;
-  row.classList.add('dragging');
-  handle.setPointerCapture(e.pointerId);
+  if (!row || !list || drag) return;
+  e.preventDefault();
 
-  const onMove = (ev) => {
-    const rows = [...list.querySelectorAll('.row')].filter((r) => r !== row);
-    let placed = false;
-    for (const r of rows) {
-      const rect = r.getBoundingClientRect();
-      if (ev.clientY < rect.top + rect.height / 2) { list.insertBefore(row, r); placed = true; break; }
+  const sy = window.scrollY;
+  const metrics = [...list.querySelectorAll('.row')].map((r) => {
+    const b = r.getBoundingClientRect();
+    return { id: r.dataset.id, el: r, top: b.top + sy, h: b.height };
+  });
+  const from = metrics.findIndex((m) => m.el === row);
+  if (from < 0) return;
+
+  drag = {
+    id: row.dataset.id, row, metrics, from, to: from,
+    startY: e.clientY + sy, clientY: e.clientY, scroll: 0, nestId: null, moved: false,
+  };
+  row.classList.add('dragging');
+  document.body.classList.add('dragging-active');
+  window.addEventListener('pointermove', onDragMove);
+  window.addEventListener('pointerup', onDragUp);
+  window.addEventListener('pointercancel', onDragUp);
+  requestAnimationFrame(dragTick);
+}
+
+function onDragMove(ev) {
+  if (!drag) return;
+  drag.clientY = ev.clientY;
+  const zone = 72;
+  drag.scroll = ev.clientY < zone ? -1 : ev.clientY > window.innerHeight - zone ? 1 : 0;
+  updateDrag();
+}
+
+// Keeps scrolling while the finger rests in the top/bottom edge zone.
+function dragTick() {
+  if (!drag) return;
+  if (drag.scroll) {
+    const before = window.scrollY;
+    window.scrollBy(0, drag.scroll * 10);
+    if (window.scrollY !== before) updateDrag();
+  }
+  requestAnimationFrame(dragTick);
+}
+
+function updateDrag() {
+  const y = drag.clientY + window.scrollY; // document coords: survives auto-scroll
+  if (Math.abs(y - drag.startY) > 5) drag.moved = true;
+  drag.row.style.transform = `translateY(${y - drag.startY}px)`;
+
+  // Middle band of a row = "drop into it"; the outer thirds = "drop between rows".
+  drag.nestId = null;
+  for (let i = 0; i < drag.metrics.length; i++) {
+    const m = drag.metrics[i];
+    const band = m.h * 0.3;
+    if (i !== drag.from && y > m.top + band && y < m.top + m.h - band && canNest(m.id)) {
+      drag.nestId = m.id;
+      break;
     }
-    if (!placed) list.appendChild(row);
-  };
-  const onUp = () => {
-    handle.removeEventListener('pointermove', onMove);
-    handle.removeEventListener('pointerup', onUp);
-    handle.removeEventListener('pointercancel', onUp);
-    row.classList.remove('dragging');
-    persistOrder([...list.querySelectorAll('.row')].map((r) => r.dataset.id));
-  };
-  handle.addEventListener('pointermove', onMove);
-  handle.addEventListener('pointerup', onUp);
-  handle.addEventListener('pointercancel', onUp);
+  }
+  if (!drag.nestId) {
+    let to = 0;
+    drag.metrics.forEach((m, i) => { if (y > m.top + m.h / 2) to = i + 1; });
+    drag.to = to > drag.from ? to - 1 : to; // the dragged row vacates its own slot
+  }
+  paintDrag();
+}
+
+function paintDrag() {
+  const gap = drag.metrics[drag.from].h;
+  drag.metrics.forEach((m, i) => {
+    if (i === drag.from) return;
+    m.el.classList.toggle('nestover', m.id === drag.nestId);
+    let shift = 0;
+    if (!drag.nestId) {
+      if (i > drag.from && i <= drag.to) shift = -gap;
+      else if (i < drag.from && i >= drag.to) shift = gap;
+    }
+    m.el.style.transform = shift ? `translateY(${shift}px)` : '';
+  });
+}
+
+// One level of subtasks only (project.md §7), and weekly tasks have no subtask list.
+function canNest(targetId) {
+  const t = tasks.find((x) => x.id === drag.id);
+  const p = tasks.find((x) => x.id === targetId);
+  if (!t || !p || p.cadence === 'weekly') return false;
+  return !subs.some((s) => s.task_id === t.id);
+}
+
+function endDrag(silent) {
+  if (!drag) return null;
+  const d = drag;
+  drag = null;
+  window.removeEventListener('pointermove', onDragMove);
+  window.removeEventListener('pointerup', onDragUp);
+  window.removeEventListener('pointercancel', onDragUp);
+  document.body.classList.remove('dragging-active');
+  d.row.classList.remove('dragging');
+  d.metrics.forEach((m) => { m.el.style.transform = ''; m.el.classList.remove('nestover'); });
+  if (d.moved) dragEndedAt = Date.now();
+  return silent ? null : d;
+}
+
+function onDragUp() {
+  const d = endDrag(false);
+  if (!d || !d.moved) return;
+  if (d.nestId) return nestTask(d.id, d.nestId);
+  if (d.to === d.from) return;
+  const ids = d.metrics.map((m) => m.id);
+  ids.splice(d.to, 0, ids.splice(d.from, 1)[0]);
+  persistOrder(ids);
+}
+
+// Dropping a task onto another turns it into a subtask: the subtask model is just a
+// title + a checkbox, so the original task row (and its cadence/history) goes away.
+async function nestTask(dragId, targetId) {
+  const t = tasks.find((x) => x.id === dragId);
+  const p = tasks.find((x) => x.id === targetId);
+  if (!t || !p) return;
+  if (t.cadence !== 'once' &&
+      !confirm(`Tornar "${t.title}" numa subtarefa de "${p.title}"?\nPerde a cadência e o progresso da semana.`)) {
+    return render();
+  }
+  if (!(await addSub(p.id, t.title, 'today'))) return;
+
+  tasks = tasks.filter((x) => x.id !== dragId);
+  comps = comps.filter((c) => c.task_id !== dragId);
+  expandedId = p.id; // open the parent so he sees where it landed
+  render();
+  await save(db.from('tasks').delete().eq('id', dragId));
 }
 
 // ---------- add-task sheet (own subtree so typing survives) ----------
@@ -461,7 +609,8 @@ function openSheet() {
         due_date: cadence === 'once' ? (wrapEl.querySelector('#nt-date').value || null) : null,
         position,
       }).select().single();
-      if (!error && data) tasks.push(data);
+      if (error) { toast('Não foi possível guardar. Tenta de novo.'); e.target.disabled = false; return; }
+      tasks.push(data);
       wrapEl.remove();
       render();
     }
@@ -470,6 +619,7 @@ function openSheet() {
 
 // ---------- event delegation ----------
 function onClick(e) {
+  if (Date.now() - dragEndedAt < 300) return; // the click that trails a drag
   const btn = e.target.closest('[data-act]');
   if (!btn || !root.contains(btn)) return;
   const act = btn.dataset.act;
@@ -493,7 +643,7 @@ function onClick(e) {
   }
   else if (act === 'del-sub') {
     subs = subs.filter((s) => s.id !== id); render();
-    db.from('subtasks').delete().eq('id', id);
+    save(db.from('subtasks').delete().eq('id', id));
   }
   else if (act === 'del-task') {
     if (confirm('Apagar esta tarefa?')) {
@@ -501,12 +651,15 @@ function onClick(e) {
       subs = subs.filter((s) => s.task_id !== id);
       comps = comps.filter((c) => c.task_id !== id);
       expandedId = null; render();
-      db.from('tasks').delete().eq('id', id);
+      save(db.from('tasks').delete().eq('id', id));
     }
   }
   else if (act === 'rename') {
     const v = prompt('Novo nome:', task.title);
-    if (v && v.trim()) { task.title = v.trim(); render(); db.from('tasks').update({ title: task.title }).eq('id', id); }
+    if (v && v.trim()) {
+      task.title = v.trim(); render();
+      save(db.from('tasks').update({ title: task.title }).eq('id', id));
+    }
   }
   else if (act === 'redate') {
     const v = prompt('Nova data (AAAA-MM-DD, vazio = quando puder):', task.due_date || '');
@@ -514,7 +667,7 @@ function onClick(e) {
       const clean = v.trim();
       if (clean && !/^\d{4}-\d{2}-\d{2}$/.test(clean)) return alert('Formato: AAAA-MM-DD');
       task.due_date = clean || null; render();
-      db.from('tasks').update({ due_date: task.due_date }).eq('id', id);
+      save(db.from('tasks').update({ due_date: task.due_date }).eq('id', id));
     }
   }
   else if (act === 'hero-done') {
