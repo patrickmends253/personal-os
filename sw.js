@@ -1,76 +1,35 @@
-// Service worker: caches the app shell so the app opens instantly and offline.
-// IMPORTANT: bump CACHE_VERSION whenever any shell file below changes.
-const CACHE_VERSION = 'personal-os-shell-v6';
-
-// Same-origin shell files — critical; install fails if any is missing.
-const SHELL = [
-  './',
-  './index.html',
-  './app.webmanifest',
-  './js/app.js',
-  './js/db.js',
-  './js/modules/tasks.js',
-  './js/modules/board.js',
-  './icons/icon-192.png',
-  './icons/icon-512.png'
-];
-
-// Cross-origin libs — best-effort so a CDN hiccup can't break the install.
-const EXTRA = [
-  'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm'
-];
+// Service worker: network-only. It caches NOTHING.
+//
+// Why this file still exists even though offline support is gone: Chrome only offers a
+// real install (a WebAPK, via the beforeinstallprompt event the "Instalar" button uses)
+// when a service worker with a fetch handler is registered. So we keep the thinnest
+// possible worker — it exists to preserve installability, not to serve content.
+//
+// The old shell-caching worker (v5 and earlier) is what made updates sticky: a phone
+// kept serving its cached copy, so a new deploy only landed after a hard reload. This
+// version deletes every cache it finds on activate, so devices coming from v5 are
+// cleaned up automatically and a normal reload always gets the latest code.
+const SW_VERSION = 'personal-os-network-only-v7';
 
 self.addEventListener('install', (event) => {
-  event.waitUntil((async () => {
-    const cache = await caches.open(CACHE_VERSION);
-    await cache.addAll(SHELL);
-    await Promise.allSettled(EXTRA.map((url) => cache.add(url)));
-    await self.skipWaiting();
-  })());
+  event.waitUntil(self.skipWaiting()); // replace the old caching worker immediately
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
+    // Drop every cache the previous versions created — this is the one-time cleanup
+    // that unsticks devices still holding the v5 app shell.
     const keys = await caches.keys();
-    await Promise.all(keys.filter((k) => k !== CACHE_VERSION).map((k) => caches.delete(k)));
+    await Promise.all(keys.map((k) => caches.delete(k)));
     await self.clients.claim();
   })());
 });
 
 self.addEventListener('fetch', (event) => {
-  const request = event.request;
-  if (request.method !== 'GET') return; // let Supabase writes (POST etc.) pass straight through
-
-  // Page loads: network-first (so updates show up), fall back to the cached shell offline.
-  if (request.mode === 'navigate') {
-    event.respondWith(
-      fetch(request)
-        .then((response) => {
-          if (response.ok) {
-            const copy = response.clone();
-            caches.open(CACHE_VERSION).then((cache) => cache.put(request, copy));
-          }
-          return response;
-        })
-        .catch(() => caches.match(request).then((c) => c || caches.match('./index.html')))
-    );
-    return;
+  // Straight to the network, nothing stored. The handler must do real work (not be a
+  // no-op) for Chrome to count it toward installability, so navigations go through fetch.
+  // Trade-off, accepted deliberately: the app no longer opens offline.
+  if (event.request.mode === 'navigate') {
+    event.respondWith(fetch(event.request));
   }
-
-  // Everything else: serve from cache if we have it (covers the CDN lib offline),
-  // otherwise go to the network and cache same-origin responses for next time.
-  event.respondWith(
-    caches.match(request).then((cached) => {
-      const network = fetch(request)
-        .then((response) => {
-          if (response.ok && new URL(request.url).origin === self.location.origin) {
-            const copy = response.clone();
-            caches.open(CACHE_VERSION).then((cache) => cache.put(request, copy));
-          }
-          return response;
-        })
-        .catch(() => cached);
-      return cached || network;
-    })
-  );
 });
