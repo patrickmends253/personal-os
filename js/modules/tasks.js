@@ -28,6 +28,7 @@ let subTarget = 'today'; // where a new subtask goes: 'today' | 'tomorrow'
 let loadError = false;
 let todayWon = null;     // does today have a day_wins row? (Progresso board reads it) — null until loaded
 
+const NEST_HOLD_MS = 400; // hold this long over a row before it becomes a nest target
 let drag = null;        // active drag gesture (see startDrag)
 let dragEndedAt = 0;    // so the click after a drag doesn't expand a row
 let toastTimer = null;
@@ -41,6 +42,7 @@ function iso(d) {
 }
 function todayStr() { return iso(new Date()); }
 function tomorrowStr() { const d = new Date(); d.setDate(d.getDate() + 1); return iso(d); }
+function daysAgoStr(n) { const d = new Date(); d.setDate(d.getDate() - n); return iso(d); }
 function mondayStr() {
   const d = new Date();
   d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
@@ -109,11 +111,12 @@ function unmount() {
 
 async function refresh() {
   const today = todayStr();
-  const tomorrow = tomorrowStr();
   const [t, s, c, w] = await Promise.all([
     db.from('tasks').select('*').order('position').order('created_at'),
+    // Undated ones are the task's backlog ("quando puder"); dated ones from the last two
+    // weeks cover today, tomorrow, anything planned ahead, and recent leftovers.
     db.from('subtasks').select('*')
-      .or(`for_date.is.null,for_date.eq.${today},for_date.eq.${tomorrow}`)
+      .or(`for_date.is.null,for_date.gte.${daysAgoStr(14)}`)
       .order('position').order('created_at'),
     db.from('task_completions').select('*').gte('done_on', mondayStr()),
     db.from('day_wins').select('won_on').eq('won_on', today).maybeSingle(),
@@ -158,19 +161,22 @@ function status(t) {
   const st = { block: false, doneToday: false, hidden: false, prog: null, count: 0 };
   const mySubs = subsFor(t, today);
 
-  if (t.cadence === 'daily' || t.cadence === 'once') {
-    if (mySubs.length > 0) {
-      st.block = true;
-      const done = mySubs.filter((s) => s.done).length;
-      st.prog = { done, total: mySubs.length };
-    }
+  // Any task can be a block now — a block is simply "has a plan for today".
+  if (mySubs.length > 0) {
+    st.block = true;
+    const done = mySubs.filter((s) => s.done).length;
+    st.prog = { done, total: mySubs.length };
   }
+
   if (t.cadence === 'daily') {
     st.doneToday = st.block ? st.prog.done === st.prog.total : compToday(t);
   } else if (t.cadence === 'weekly') {
     st.count = weekCount(t);
-    st.doneToday = compToday(t);
-    st.hidden = st.count >= (t.quota || 1) && !st.doneToday; // met earlier in the week
+    // With a plan for today, finishing the plan is what counts as today's session;
+    // maintainWeeklyBlock() writes the matching completion row so the quota advances.
+    st.doneToday = st.block ? st.prog.done === st.prog.total : compToday(t);
+    // met earlier in the week → rest, unless he has deliberately planned today
+    st.hidden = st.count >= (t.quota || 1) && !st.doneToday && !st.block;
   } else { // once
     if (t.completed_at) {
       st.doneToday = iso(new Date(t.completed_at)) === today;
@@ -215,7 +221,7 @@ function heroHtml(open) {
     const pct = Math.round((st.prog.done / st.prog.total) * 100);
     return `<div class="hero">
       <div class="title">${esc(next.title)}</div>
-      <div class="sub">Parte de: ${esc(t.title)} · ${st.prog.done + 1} de ${st.prog.total}${t.cadence === 'daily' ? ' hoje' : ''}</div>
+      <div class="sub">Parte de: ${esc(t.title)} · ${st.prog.done + 1} de ${st.prog.total}${t.cadence === 'once' ? '' : ' hoje'}</div>
       <div class="bar"><i style="width:${pct}%"></i></div>
       <button class="btn" data-act="hero-done" data-id="${t.id}" data-sub="${next.id}">Concluir</button>
     </div>`;
@@ -239,7 +245,9 @@ function rowMeta(t, st) {
   if (st.block) {
     const pct = Math.round((st.prog.done / st.prog.total) * 100);
     bits.push(`<span class="minibar"><i style="width:${pct}%"></i></span>
-      <span>${st.prog.done}/${st.prog.total}${t.cadence === 'daily' ? ' hoje' : ''}</span>`);
+      <span>${st.prog.done}/${st.prog.total}${t.cadence === 'once' ? '' : ' hoje'}</span>`);
+    // a weekly block still needs its week counter alongside today's plan
+    if (t.cadence === 'weekly') bits.push(`<span class="tag">${st.count}/${t.quota || 1} sem.</span>`);
   } else if (t.cadence === 'weekly') {
     if ((t.quota || 1) > 1) {
       const pct = Math.round((st.count / t.quota) * 100);
@@ -258,35 +266,64 @@ function rowMeta(t, st) {
   return bits.length ? `<span class="tsub">${bits.join('')}</span>` : '';
 }
 
-function expandHtml(t, st) {
+// A recurring task's subtasks live in buckets by date: today's plan, later (tomorrow and
+// beyond), leftovers (dated before today and still undone), and the undated backlog
+// ("quando puder"). A one-off task has no days, so it just keeps one flat checklist.
+function subBuckets(t) {
   const today = todayStr();
-  const list = subsFor(t, today);
-  const tmr = t.cadence === 'daily' ? subs.filter((s) => s.task_id === t.id && s.for_date === tomorrowStr()) : [];
-  const canSub = t.cadence === 'daily' || t.cadence === 'once';
+  const mine = subs.filter((s) => s.task_id === t.id);
+  if (t.cadence === 'once') return { plan: mine, later: [], left: [], someday: [] };
+  return {
+    plan: mine.filter((s) => s.for_date === today),
+    later: mine.filter((s) => s.for_date > today),
+    left: mine.filter((s) => s.for_date && s.for_date < today && !s.done),
+    someday: mine.filter((s) => !s.for_date),
+  };
+}
+
+function subLine(s, { check = true, move = false } = {}) {
+  return `<div class="subrow ${s.done ? 'sdone' : ''}">
+    ${check
+      ? `<button class="cb ${s.done ? 'on' : ''}" data-act="toggle-sub" data-id="${s.id}">✓</button>`
+      : ''}
+    <span class="st"${check ? '' : ' style="color:var(--muted)"'}>${esc(s.title)}</span>
+    ${move ? `<button class="xbtn move" data-act="sub-to-today" data-id="${s.id}" title="Trazer para hoje">↑ hoje</button>` : ''}
+    <button class="xbtn" data-act="del-sub" data-id="${s.id}">×</button>
+  </div>`;
+}
+
+function expandHtml(t, st) {
+  const b = subBuckets(t);
+  const dayLabel = (d) => d === tomorrowStr() ? 'amanhã'
+    : new Date(d + 'T00:00:00').toLocaleDateString('pt-PT', { day: 'numeric', month: 'short' });
 
   let h = '<div class="expand">';
-  if (canSub) {
-    for (const s of list) {
-      h += `<div class="subrow ${s.done ? 'sdone' : ''}">
-        <button class="cb ${s.done ? 'on' : ''}" data-act="toggle-sub" data-id="${s.id}">✓</button>
-        <span class="st">${esc(s.title)}</span>
-        <button class="xbtn" data-act="del-sub" data-id="${s.id}">×</button>
-      </div>`;
-    }
-    if (tmr.length) {
-      h += `<div class="subhead">Para amanhã</div>`;
-      for (const s of tmr) {
-        h += `<div class="subrow"><span class="st" style="color:var(--muted)">${esc(s.title)}</span>
-          <button class="xbtn" data-act="del-sub" data-id="${s.id}">×</button></div>`;
-      }
-    }
-    h += `<div class="addsub">
-      <input class="field" id="addsub-input" placeholder="Nova subtarefa…" autocomplete="off">
-      ${t.cadence === 'daily'
-        ? `<button class="pill ${subTarget === 'today' ? 'on' : ''}" data-act="sub-target" data-v="today">Hoje</button>
-           <button class="pill ${subTarget === 'tomorrow' ? 'on' : ''}" data-act="sub-target" data-v="tomorrow">Amanhã</button>`
-        : ''}
-      <button class="pill on" data-act="add-sub" data-id="${t.id}">+</button>
+  h += b.plan.map((s) => subLine(s)).join('');
+
+  if (b.left.length) {
+    h += `<div class="subhead">Por acabar</div>`;
+    h += b.left.map((s) => subLine(s, { check: false, move: true })).join('');
+  }
+  if (b.later.length) {
+    h += `<div class="subhead">Mais tarde</div>`;
+    h += b.later.map((s) =>
+      subLine(s, { check: false, move: true }).replace('</span>',
+        `</span><span class="tag">${dayLabel(s.for_date)}</span>`)).join('');
+  }
+  if (b.someday.length) {
+    h += `<div class="subhead">Quando puder</div>`;
+    h += b.someday.map((s) => subLine(s, { check: false, move: true })).join('');
+  }
+
+  h += `<div class="addsub">
+    <input class="field" id="addsub-input" placeholder="Nova subtarefa…" autocomplete="off">
+    <button class="pill on" data-act="add-sub" data-id="${t.id}">+</button>
+  </div>`;
+  // A one-off task has no "today" — its checklist is simply the task's steps.
+  if (t.cadence !== 'once') {
+    h += `<div class="pills subwhen">
+      ${[['today', 'Hoje'], ['tomorrow', 'Amanhã'], ['none', 'Quando puder']].map(([v, label]) =>
+        `<button class="pill ${subTarget === v ? 'on' : ''}" data-act="sub-target" data-v="${v}">${label}</button>`).join('')}
     </div>`;
   }
   h += `<div class="rowactions">
@@ -365,34 +402,66 @@ async function toggleSub(id) {
   const s = subs.find((x) => x.id === id);
   s.done = !s.done; render();
   await save(db.from('subtasks').update({ done: s.done }).eq('id', id));
-  // a one-off block completes itself when its last subtask is checked
-  const t = tasks.find((x) => x.id === s.task_id);
-  if (t && t.cadence === 'once') {
-    const mine = subsFor(t, todayStr());
-    const allDone = mine.length > 0 && mine.every((x) => x.done);
+  await syncBlock(tasks.find((x) => x.id === s.task_id));
+}
+
+// A block's plan is the source of truth for whether it is done. Once the plan is complete
+// we record that: a one-off task gets its completed_at, a weekly task gets a completion row
+// for today (which is what the n/5 quota and the history are counted from). Daily tasks
+// need nothing stored — status() reads the plan directly.
+async function syncBlock(t) {
+  if (!t) return;
+  const mine = subsFor(t, todayStr());
+  if (mine.length === 0) return;
+  const allDone = mine.every((x) => x.done);
+
+  if (t.cadence === 'once') {
     const v = allDone ? (t.completed_at || new Date().toISOString()) : null;
-    if ((t.completed_at || null) !== v) {
-      t.completed_at = v; render();
-      await save(db.from('tasks').update({ completed_at: v }).eq('id', t.id));
-    }
+    if ((t.completed_at || null) === v) return;
+    t.completed_at = v; render();
+    await save(db.from('tasks').update({ completed_at: v }).eq('id', t.id));
+    return;
+  }
+  if (t.cadence !== 'weekly') return;
+
+  const existing = comps.find((c) => c.task_id === t.id && c.done_on === todayStr());
+  if (allDone && !existing) {
+    const row = { user_id: uid, task_id: t.id, done_on: todayStr() };
+    comps.push(row); render();
+    const { data, error } = await db.from('task_completions').insert(row).select().single();
+    if (error) { toast('Não foi possível guardar. Tenta de novo.'); await refresh(); }
+    else if (data) Object.assign(row, data);
+  } else if (!allDone && existing) {
+    comps = comps.filter((c) => c !== existing); render();
+    if (existing.id) await save(db.from('task_completions').delete().eq('id', existing.id));
   }
 }
 
 async function addSub(taskId, title, target = subTarget) {
   const t = tasks.find((x) => x.id === taskId);
-  const for_date = t.cadence === 'daily' ? (target === 'today' ? todayStr() : tomorrowStr()) : null;
+  const for_date = t.cadence === 'once' || target === 'none' ? null
+    : target === 'tomorrow' ? tomorrowStr()
+    : todayStr();
   const position = subs.filter((s) => s.task_id === taskId).length;
   const { data, error } = await db.from('subtasks')
     .insert({ user_id: uid, task_id: taskId, title, for_date, position }).select().single();
   if (error) { toast('Não foi possível guardar. Tenta de novo.'); await refresh(); return null; }
   subs.push(data);
-  // adding a subtask reopens a completed one-off block
-  if (t.cadence === 'once' && t.completed_at) {
-    t.completed_at = null;
-    await save(db.from('tasks').update({ completed_at: null }).eq('id', t.id));
-  }
   render();
+  // adding an unfinished step reopens a block that had been completed
+  await syncBlock(t);
   return data;
+}
+
+// Pull a leftover / backlog / future subtask into today's plan.
+async function subToToday(id) {
+  const s = subs.find((x) => x.id === id);
+  if (!s) return;
+  s.for_date = todayStr();
+  s.done = false;
+  render();
+  await save(db.from('subtasks').update({ for_date: s.for_date, done: false }).eq('id', id));
+  await syncBlock(tasks.find((x) => x.id === s.task_id));
 }
 
 async function persistOrder(orderedIds) {
@@ -437,7 +506,8 @@ function startDrag(e, handle) {
 
   drag = {
     id: row.dataset.id, row, metrics, from, to: from,
-    startY: e.clientY + sy, clientY: e.clientY, scroll: 0, nestId: null, moved: false,
+    startY: e.clientY + sy, clientY: e.clientY, scroll: 0, moved: false,
+    nestId: null, overId: null, overSince: 0,
   };
   row.classList.add('dragging');
   document.body.classList.add('dragging-active');
@@ -455,14 +525,12 @@ function onDragMove(ev) {
   updateDrag();
 }
 
-// Keeps scrolling while the finger rests in the top/bottom edge zone.
+// Runs every frame while dragging: keeps scrolling at the screen edge, and keeps the
+// hold-to-nest timer ticking even when the finger is perfectly still.
 function dragTick() {
   if (!drag) return;
-  if (drag.scroll) {
-    const before = window.scrollY;
-    window.scrollBy(0, drag.scroll * 10);
-    if (window.scrollY !== before) updateDrag();
-  }
+  if (drag.scroll) window.scrollBy(0, drag.scroll * 10);
+  updateDrag();
   requestAnimationFrame(dragTick);
 }
 
@@ -472,15 +540,20 @@ function updateDrag() {
   drag.row.style.transform = `translateY(${y - drag.startY}px)`;
 
   // Middle band of a row = "drop into it"; the outer thirds = "drop between rows".
-  drag.nestId = null;
+  // Nesting deletes the dragged task, so it must be deliberate: you have to HOLD over the
+  // row for a moment before it engages. Brushing past a row on the way to a new position
+  // can't nest by accident (which is exactly how a task got swallowed on 2026-07-26).
+  let over = null;
   for (let i = 0; i < drag.metrics.length; i++) {
     const m = drag.metrics[i];
     const band = m.h * 0.3;
     if (i !== drag.from && y > m.top + band && y < m.top + m.h - band && canNest(m.id)) {
-      drag.nestId = m.id;
+      over = m.id;
       break;
     }
   }
+  if (over !== drag.overId) { drag.overId = over; drag.overSince = Date.now(); }
+  drag.nestId = over && Date.now() - drag.overSince >= NEST_HOLD_MS ? over : null;
   if (!drag.nestId) {
     let to = 0;
     drag.metrics.forEach((m, i) => { if (y > m.top + m.h / 2) to = i + 1; });
@@ -503,11 +576,11 @@ function paintDrag() {
   });
 }
 
-// One level of subtasks only (project.md §7), and weekly tasks have no subtask list.
+// One level of subtasks only (project.md §7) — so a task that already has its own
+// subtasks can't be nested. Every cadence can now be a parent.
 function canNest(targetId) {
   const t = tasks.find((x) => x.id === drag.id);
-  const p = tasks.find((x) => x.id === targetId);
-  if (!t || !p || p.cadence === 'weekly') return false;
+  if (!t || !tasks.some((x) => x.id === targetId)) return false;
   return !subs.some((s) => s.task_id === t.id);
 }
 
@@ -541,10 +614,8 @@ async function nestTask(dragId, targetId) {
   const t = tasks.find((x) => x.id === dragId);
   const p = tasks.find((x) => x.id === targetId);
   if (!t || !p) return;
-  if (t.cadence !== 'once' &&
-      !confirm(`Tornar "${t.title}" numa subtarefa de "${p.title}"?\nPerde a cadência e o progresso da semana.`)) {
-    return render();
-  }
+  const loses = t.cadence !== 'once' ? '\n\nDeixa de ser tarefa: perde a cadência e o progresso da semana.' : '';
+  if (!confirm(`Tornar "${t.title}" numa subtarefa de "${p.title}"?${loses}`)) return render();
   if (!(await addSub(p.id, t.title, 'today'))) return;
 
   tasks = tasks.filter((x) => x.id !== dragId);
@@ -641,9 +712,11 @@ function onClick(e) {
     const title = input.value.trim();
     if (title) { input.value = ''; addSub(id, title); }
   }
+  else if (act === 'sub-to-today') subToToday(id);
   else if (act === 'del-sub') {
+    const owner = tasks.find((t) => t.id === subs.find((s) => s.id === id)?.task_id);
     subs = subs.filter((s) => s.id !== id); render();
-    save(db.from('subtasks').delete().eq('id', id));
+    save(db.from('subtasks').delete().eq('id', id)).then(() => syncBlock(owner));
   }
   else if (act === 'del-task') {
     if (confirm('Apagar esta tarefa?')) {

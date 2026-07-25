@@ -243,6 +243,11 @@
     .subrow .st { flex: 1; font-size: 0.9rem; }
     .subrow.sdone .st { color: var(--muted); text-decoration: line-through; }
     .xbtn { background: none; border: none; color: var(--muted); font-size: 1rem; padding: 4px 8px; }
+    /* "↑ hoje" — pulls a leftover / backlog / future step into today's plan */
+    .xbtn.move { color: var(--accent); font-size: 0.74rem; padding: 4px 6px; white-space: nowrap; }
+    .subrow .tag { flex: none; }
+    /* where a new subtask lands: hoje / amanhã / quando puder */
+    .subwhen .pill { padding: 5px 11px; font-size: 0.78rem; }
     .addsub { display: flex; gap: 8px; align-items: center; }
     .addsub .field { padding: 9px 12px; font-size: 0.9rem; border-radius: 10px; flex: 1; }
     .pill {
