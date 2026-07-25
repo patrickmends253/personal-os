@@ -1,6 +1,6 @@
 // Service worker: caches the app shell so the app opens instantly and offline.
 // IMPORTANT: bump CACHE_VERSION whenever any shell file below changes.
-const CACHE_VERSION = 'personal-os-shell-v5';
+const CACHE_VERSION = 'personal-os-shell-v6';
 
 // Same-origin shell files — critical; install fails if any is missing.
 const SHELL = [
@@ -10,6 +10,7 @@ const SHELL = [
   './js/app.js',
   './js/db.js',
   './js/modules/tasks.js',
+  './js/modules/board.js',
   './icons/icon-192.png',
   './icons/icon-512.png'
 ];
