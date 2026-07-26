@@ -281,6 +281,25 @@
       flex: none; margin-top: 2px;
     }
     .pagepanel .expand { padding: 0 0 4px; }
+
+    /* ---- planning the next day ---- */
+    .planlist { display: flex; flex-direction: column; }
+    .planrow {
+      display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+      background: none; border: none; border-bottom: 1px solid var(--line);
+      color: var(--text); padding: 13px 2px; font-size: 0.95rem;
+    }
+    .planrow:last-child { border-bottom: none; }
+    .planrow .st { flex: 1; min-width: 0; }
+    .planrow .cb { pointer-events: none; }
+    .planrow.on .st { color: var(--accent); font-weight: 600; }
+    /* "Esta semana" — there but not chosen, so it sits back visually */
+    .rows.later .row .tt { color: var(--muted); }
+
+    /* colour picker in the category editor */
+    .swatches { display: flex; gap: 10px; flex-wrap: wrap; }
+    .swatch { width: 34px; height: 34px; border-radius: 50%; border: 2px solid transparent; padding: 0; }
+    .swatch.on { border-color: var(--text); }
     .addsub { display: flex; gap: 8px; align-items: center; }
     .addsub .field { padding: 9px 12px; font-size: 0.9rem; border-radius: 10px; flex: 1; }
     .pill {

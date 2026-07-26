@@ -39,6 +39,7 @@ const CAT_COLORS = ['#F5A524', '#4ADE80', '#60A5FA', '#F472B6', '#A78BFA', '#2DD
 // categories hide, history stops recording — instead of breaking adding a subtask.
 let catsOk = true;
 let daysOk = true;
+let planOk = true;
 let todayWon = null;     // does today have a day_wins row? (Progresso board reads it) — null until loaded
 
 const NEST_HOLD_MS = 400; // hold this long over a row before it becomes a nest target
@@ -141,6 +142,9 @@ async function refresh() {
     tasks = t.data;
     subs = s.data;
     comps = c.data;
+    // the planning columns are absent until that migration is run: without them, keep the
+    // old behaviour (every weekly routine on the Today list) rather than half a feature
+    planOk = t.data.length === 0 || 'planned_for' in t.data[0];
     catsOk = !g.error;    // false until the categories migration is run — not fatal
     cats = g.data || [];
     todayWon = !!w.data;  // a missing row (not an error) means today isn't won yet
@@ -238,19 +242,32 @@ function status(t) {
   return st;
 }
 
+// Is this task part of *today*, or is it just available this week? Dailies and one-offs are
+// always today's business. A weekly routine is only today's if he chose it the night before,
+// already planned steps for it, or has started it — otherwise it drops to "Esta semana"
+// below, still visible and tickable all day (his design, 2026-07-26).
+function isForToday(t) {
+  if (!planOk || t.cadence !== 'weekly') return true;
+  return t.planned_for === todayStr()
+    || subsFor(t, todayStr()).length > 0
+    || compToday(t);
+}
+
 function visibleLists() {
   const open = [];
+  const later = [];
   const done = [];
   for (const t of tasks) {
     const st = status(t);
     if (st.hidden) continue;
-    (st.doneToday ? done : open).push({ t, st });
+    if (st.doneToday) done.push({ t, st });
+    else (isForToday(t) ? open : later).push({ t, st });
   }
-  return { open, done };
+  return { open, later, done };
 }
 
 // ---------- rendering ----------
-function heroHtml(open) {
+function heroHtml(open, later = []) {
   if (loadError) {
     return `<div class="hero zen"><div class="title">Não foi possível carregar.</div>
       <div class="sub">Verifica a ligação e volta a tentar.</div>
@@ -261,8 +278,13 @@ function heroHtml(open) {
       <div class="sub">Toca em + e cria a primeira.</div></div>`;
   }
   if (open.length === 0) {
-    return `<div class="hero zen"><div class="title">Tudo feito por hoje.</div>
-      <div class="sub">Descansa — ou adiciona o que vier.</div></div>`;
+    // Nothing chosen for today isn't the same as nothing left to do — don't say "all done"
+    // when there are still weekly routines sitting below waiting to be picked up.
+    return later.length
+      ? `<div class="hero zen"><div class="title">Nada escolhido para hoje.</div>
+          <div class="sub">Há ${later.length} ${later.length === 1 ? 'coisa' : 'coisas'} desta semana aqui em baixo, se te apetecer.</div></div>`
+      : `<div class="hero zen"><div class="title">Tudo feito por hoje.</div>
+          <div class="sub">Descansa — ou adiciona o que vier.</div></div>`;
   }
 
   const { t, st } = open[0];
@@ -339,12 +361,15 @@ function subLeftovers(t) {
   return subs.filter((s) => s.task_id === t.id && s.for_date && s.for_date < todayStr() && !s.done);
 }
 
+// Categories belong to one task (his call, 2026-07-27): "Personal OS" means something on
+// Claude 1h and nothing on Exercício físico, so each task keeps its own list.
+function catsFor(taskId) { return cats.filter((c) => c.task_id === taskId); }
 function catOf(s) { return cats.find((c) => c.id === s.category_id) || null; }
 
 function subLine(s, { check = true, move = false, day = '' } = {}) {
   const c = catOf(s);
   // the dot doubles as the control: tapping it cycles the step through the categories
-  const dot = cats.length
+  const dot = catsFor(s.task_id).length
     ? `<button class="catdot" data-act="cycle-cat" data-id="${s.id}"
          style="${c ? `background:${c.color};border-color:${c.color}` : ''}"
          title="${c ? esc(c.name) : 'Sem categoria'}"></button>`
@@ -382,13 +407,14 @@ function expandHtml(t, st) {
 
   // Category chips work like the day tabs: the selected one filters the list AND is what a
   // new step gets tagged with. "Todas" selected = show everything, tag nothing.
+  // Long-press a chip to rename it, recolour it or delete it.
+  const mine = catsFor(t.id);
   if (catsOk) h += `<div class="pills cats">
-    <button class="pill ${catSel === null ? 'on' : ''}" data-act="cat-sel" data-v="">Todas</button>
-    ${cats.map((c) => `<button class="pill cat ${catSel === c.id ? 'on' : ''}" data-act="cat-sel" data-v="${c.id}"
+    ${mine.length ? `<button class="pill ${catSel === null ? 'on' : ''}" data-act="cat-sel" data-v="">Todas</button>` : ''}
+    ${mine.map((c) => `<button class="pill cat ${catSel === c.id ? 'on' : ''}" data-act="cat-sel" data-v="${c.id}"
         style="${catSel === c.id ? `border-color:${c.color};color:${c.color}` : ''}">
         <i style="background:${c.color}"></i>${esc(c.name)}</button>`).join('')}
-    <button class="pill" data-act="cat-new" title="Nova categoria">+</button>
-    ${catSel !== null ? `<button class="pill danger" data-act="cat-del" data-v="${catSel}">Apagar categoria</button>` : ''}
+    <button class="pill" data-act="cat-new" data-id="${t.id}" title="Nova categoria">+ categoria</button>
   </div>`;
 
   const shown = catSel === null ? list : list.filter((s) => s.category_id === catSel);
@@ -423,7 +449,7 @@ function expandHtml(t, st) {
   return h;
 }
 
-function rowHtml({ t, st }, isDone) {
+function rowHtml({ t, st }, isDone, isLater) {
   const cbOn = isDone || st.doneToday;
   return `<div class="row ${isDone ? 'done-row' : ''}" data-id="${t.id}">
     <div class="rowline">
@@ -431,8 +457,9 @@ function rowHtml({ t, st }, isDone) {
       <button class="tmain" data-act="expand" data-id="${t.id}">
         <div class="tt">${esc(t.title)}</div>${rowMeta(t, st)}
       </button>
+      ${isLater ? `<button class="xbtn move" data-act="plan-today" data-id="${t.id}">↑ hoje</button>` : ''}
       ${hasPage(t) ? `<button class="pagebtn" data-act="open-page" data-id="${t.id}" title="Abrir a página">›</button>` : ''}
-      ${!isDone ? `<button class="handle" data-id="${t.id}">≡</button>` : ''}
+      ${!isDone && !isLater ? `<button class="handle" data-id="${t.id}">≡</button>` : ''}
     </div>
     ${expandedId === t.id ? expandHtml(t, st) : ''}
   </div>`;
@@ -518,7 +545,60 @@ function taskBoardHtml() {
   </div>`;
 }
 
+// ---------- the planning page ----------
+// This is the page of his "Planear o dia seguinte" task (flagged is_planner, so renaming
+// it can't break anything). Picking a routine here sets planned_for = tomorrow, which is
+// what puts it in tomorrow's "Hoje" list instead of down in "Esta semana".
+function plannerHtml(t) {
+  const tmr = tomorrowStr();
+  const routines = tasks.filter((x) => x.cadence === 'weekly' && !x.is_planner);
+  const chosen = routines.filter((x) => x.planned_for === tmr);
+  const dated = tasks.filter((x) => x.cadence === 'once' && !x.completed_at && x.due_date === tmr);
+  const label = new Date(tmr + 'T00:00:00').toLocaleDateString('pt-PT', { weekday: 'long', day: 'numeric', month: 'long' });
+
+  const line = (x) => {
+    const planned = x.planned_for === tmr;
+    const steps = subs.filter((s) => s.task_id === x.id && s.for_date === tmr).length;
+    return `<button class="planrow ${planned ? 'on' : ''}" data-act="plan-toggle" data-id="${x.id}">
+      <span class="cb ${planned ? 'on' : ''}">✓</span>
+      <span class="st">${esc(x.title)}</span>
+      ${steps ? `<span class="tag">${steps} ${steps === 1 ? 'passo' : 'passos'}</span>` : ''}
+      <span class="tag">${weekCount(x)}/${x.quota || 1} sem.</span>
+    </button>`;
+  };
+
+  return `
+    <div class="pagehead">
+      <button class="backbtn" data-act="close-page">‹</button>
+      <div>
+        <h1>Amanhã</h1>
+        <div class="date">${label.charAt(0).toUpperCase() + label.slice(1)}</div>
+      </div>
+    </div>
+
+    <div class="kicker">O que queres fazer</div>
+    <div class="hint" style="margin:-4px 0 10px">O que escolheres abre o dia amanhã. O resto fica em "Esta semana", à mão.</div>
+    <div class="planlist">${routines.map(line).join('') || '<p class="empty">Sem rotinas semanais.</p>'}</div>
+
+    <div class="kicker plain">Só para amanhã</div>
+    <div class="addsub">
+      <input class="field" id="newtmr-input" placeholder="Algo pontual para amanhã…" autocomplete="off">
+      <button class="pill on" data-act="add-tomorrow">+</button>
+    </div>
+    ${dated.length ? `<div class="rows">${dated.map((x) => `
+      <div class="subrow"><span class="st">${esc(x.title)}</span>
+        <button class="xbtn" data-act="del-task-quiet" data-id="${x.id}">×</button></div>`).join('')}</div>` : ''}
+
+    <div class="kicker plain">Resumo</div>
+    <p class="empty">${chosen.length + dated.length === 0
+      ? 'Ainda não escolheste nada. Amanhã abre só com as diárias.'
+      : `Amanhã abre com as diárias${chosen.length ? ` + ${chosen.length} ${chosen.length === 1 ? 'rotina' : 'rotinas'}` : ''}${dated.length ? ` + ${dated.length} ${dated.length === 1 ? 'tarefa pontual' : 'tarefas pontuais'}` : ''}.`}</p>
+    <p class="hint">Para preparar os passos de um bloco (Etsy, Claude…), abre a página dele e usa a pastilha <b>Amanhã</b>.</p>
+  `;
+}
+
 function pageHtml(t) {
+  if (t.is_planner && planOk) return plannerHtml(t);
   const st = status(t);
   let sub = t.cadence === 'daily' ? 'Todos os dias'
     : (t.quota || 1) > 1 ? `${st.count} de ${t.quota} esta semana` : '1× por semana';
@@ -549,7 +629,7 @@ function render() {
     else { root.innerHTML = pageHtml(t); return; }
   }
 
-  const { open, done } = visibleLists();
+  const { open, later, done } = visibleLists();
   const h = new Date().getHours();
   const greet = h < 12 ? 'Bom dia.' : h < 20 ? 'Boa tarde.' : 'Boa noite.';
   const dateStr = new Date().toLocaleDateString('pt-PT', { weekday: 'long', day: 'numeric', month: 'long' });
@@ -563,10 +643,14 @@ function render() {
       ${counts}
     </div>
     <div class="kicker">A seguir</div>
-    ${heroHtml(open)}
+    ${heroHtml(open, later)}
     ${open.length
       ? `<div class="kicker plain">Hoje</div>
          <div class="rows" id="open-rows">${open.map((x) => rowHtml(x, false)).join('')}</div>` : ''}
+    ${later.length
+      ? `<div class="kicker plain">Esta semana</div>
+         <div class="hint" style="margin:-4px 0 8px">Não escolheste para hoje — mas estão aqui se te apetecer.</div>
+         <div class="rows later">${later.map((x) => rowHtml(x, false, true)).join('')}</div>` : ''}
     ${done.length
       ? `<div class="kicker plain">Feitas hoje</div>
          <div class="rows">${done.map((x) => rowHtml(x, true)).join('')}</div>` : ''}
@@ -656,12 +740,20 @@ async function addSub(taskId, title, target = subTarget) {
 }
 
 // ---------- categories ----------
-async function newCat() {
+// A new one picks the first colour this task isn't already using, so two categories on the
+// same task never look alike without him having to think about it.
+function nextColor(taskId) {
+  const used = new Set(catsFor(taskId).map((c) => c.color));
+  return CAT_COLORS.find((c) => !used.has(c)) || CAT_COLORS[catsFor(taskId).length % CAT_COLORS.length];
+}
+
+async function newCat(taskId) {
   const name = prompt('Nome da nova categoria:');
   if (!name || !name.trim()) return;
-  const color = CAT_COLORS[cats.length % CAT_COLORS.length];
-  const { data, error } = await db.from('categories')
-    .insert({ user_id: uid, name: name.trim(), color, position: cats.length }).select().single();
+  const { data, error } = await db.from('categories').insert({
+    user_id: uid, task_id: taskId, name: name.trim(),
+    color: nextColor(taskId), position: catsFor(taskId).length,
+  }).select().single();
   if (error) { toast('Não foi possível criar a categoria.'); return; }
   cats.push(data);
   catSel = data.id; // land on the new one, so the next step he adds gets tagged with it
@@ -678,14 +770,75 @@ async function delCat(id) {
   await save(db.from('categories').delete().eq('id', id));
 }
 
-// Tapping a step's dot walks it through the categories and back to none.
+// Long-press a chip: rename, recolour, or delete. Kept off the normal tap so the chip's
+// main job (filter + tag) stays a single quick touch.
+function editCat(id) {
+  const c = cats.find((x) => x.id === id);
+  if (!c) return;
+  let color = c.color;
+  const wrapEl = document.createElement('div');
+  wrapEl.className = 'sheetwrap';
+  wrapEl.innerHTML = `<div class="sheet">
+    <h2>Categoria</h2>
+    <input class="field" id="cat-name" autocomplete="off" value="${esc(c.name)}">
+    <div class="swatches">
+      ${CAT_COLORS.map((col) => `<button class="swatch ${col === color ? 'on' : ''}"
+        data-col="${col}" style="background:${col}"></button>`).join('')}
+    </div>
+    <button class="btn" id="cat-save">Guardar</button>
+    <button class="ghostbtn danger" id="cat-remove">Apagar categoria</button>
+  </div>`;
+  root.appendChild(wrapEl);
+  wrapEl.querySelector('#cat-name').focus();
+
+  wrapEl.addEventListener('click', async (e) => {
+    if (e.target === wrapEl) return wrapEl.remove();
+    const sw = e.target.closest('[data-col]');
+    if (sw) {
+      color = sw.dataset.col;
+      wrapEl.querySelectorAll('.swatch').forEach((s) => s.classList.toggle('on', s.dataset.col === color));
+      return;
+    }
+    if (e.target.id === 'cat-remove') { wrapEl.remove(); return delCat(id); }
+    if (e.target.id === 'cat-save') {
+      const name = wrapEl.querySelector('#cat-name').value.trim() || c.name;
+      Object.assign(c, { name, color });
+      wrapEl.remove();
+      render();
+      await save(db.from('categories').update({ name, color }).eq('id', id));
+    }
+  });
+}
+
+// Tapping a step's dot walks it through that task's categories and back to none.
 async function cycleCat(id) {
   const s = subs.find((x) => x.id === id);
-  if (!s || !cats.length) return;
-  const i = cats.findIndex((c) => c.id === s.category_id);
-  s.category_id = i + 1 >= cats.length ? null : cats[i + 1].id;
+  if (!s) return;
+  const mine = catsFor(s.task_id);
+  if (!mine.length) return;
+  const i = mine.findIndex((c) => c.id === s.category_id);
+  s.category_id = i + 1 >= mine.length ? null : mine[i + 1].id;
   render();
   await save(db.from('subtasks').update({ category_id: s.category_id }).eq('id', id));
+}
+
+// ---------- planning ----------
+async function planToggle(id, day) {
+  const t = tasks.find((x) => x.id === id);
+  if (!t) return;
+  t.planned_for = t.planned_for === day ? null : day;
+  render();
+  await save(db.from('tasks').update({ planned_for: t.planned_for }).eq('id', id));
+}
+
+async function addTomorrowTask(title) {
+  const position = tasks.length ? Math.max(...tasks.map((x) => x.position)) + 1 : 0;
+  const { data, error } = await db.from('tasks').insert({
+    user_id: uid, title, cadence: 'once', quota: null, due_date: tomorrowStr(), position,
+  }).select().single();
+  if (error) { toast('Não foi possível guardar. Tenta de novo.'); return; }
+  tasks.push(data);
+  render();
 }
 
 // Pull a leftover / backlog / future subtask into today's plan.
@@ -958,12 +1111,23 @@ function onClick(e) {
     if (title) { input.value = ''; addSub(id, title); }
   }
   else if (act === 'cat-sel') {
+    if (btn.dataset.longpress) { delete btn.dataset.longpress; return; } // the editor opened
     const v = btn.dataset.v || null;
     catSel = catSel === v ? null : v; // tap the active chip again to go back to Todas
     render();
   }
-  else if (act === 'cat-new') newCat();
-  else if (act === 'cat-del') delCat(btn.dataset.v);
+  else if (act === 'cat-new') newCat(id);
+  else if (act === 'plan-toggle') planToggle(id, tomorrowStr());
+  else if (act === 'plan-today') planToggle(id, todayStr());
+  else if (act === 'add-tomorrow') {
+    const input = root.querySelector('#newtmr-input');
+    const title = input.value.trim();
+    if (title) { input.value = ''; addTomorrowTask(title); }
+  }
+  else if (act === 'del-task-quiet') {
+    tasks = tasks.filter((x) => x.id !== id); render();
+    save(db.from('tasks').delete().eq('id', id));
+  }
   else if (act === 'cycle-cat') cycleCat(id);
   else if (act === 'sub-to-today') subToToday(id);
   else if (act === 'del-sub') {
@@ -1004,12 +1168,35 @@ function onClick(e) {
 
 function onPointerDown(e) {
   const handle = e.target.closest('.handle');
-  if (handle && root.contains(handle)) startDrag(e, handle);
+  if (handle && root.contains(handle)) { startDrag(e, handle); return; }
+
+  // long-press a category chip to edit it; a normal tap still selects it
+  const chip = e.target.closest('.cats .pill.cat');
+  if (!chip || !root.contains(chip)) return;
+  const id = chip.dataset.v;
+  const timer = setTimeout(() => {
+    chip.dataset.longpress = '1';
+    if (navigator.vibrate) navigator.vibrate(15);
+    editCat(id);
+  }, 480);
+  const cancel = () => {
+    clearTimeout(timer);
+    chip.removeEventListener('pointerup', cancel);
+    chip.removeEventListener('pointercancel', cancel);
+    chip.removeEventListener('pointerleave', cancel);
+  };
+  chip.addEventListener('pointerup', cancel);
+  chip.addEventListener('pointercancel', cancel);
+  chip.addEventListener('pointerleave', cancel);
 }
 function onKeyDown(e) {
-  if (e.key === 'Enter' && e.target.id === 'addsub-input') {
+  if (e.key !== 'Enter') return;
+  if (e.target.id === 'addsub-input') {
     const title = e.target.value.trim();
     const btn = root.querySelector('[data-act="add-sub"]');
     if (title && btn) { e.target.value = ''; addSub(btn.dataset.id, title); }
+  } else if (e.target.id === 'newtmr-input') {
+    const title = e.target.value.trim();
+    if (title) { e.target.value = ''; addTomorrowTask(title); }
   }
 }
