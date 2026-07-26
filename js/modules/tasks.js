@@ -23,9 +23,20 @@ let uid = null;
 let tasks = [];
 let subs = [];
 let comps = [];
+let cats = [];
 let expandedId = null;
-let subTarget = 'today'; // where a new subtask goes: 'today' | 'tomorrow'
+let subTarget = 'today'; // which day tab: 'today' | 'tomorrow' | 'none'
+let catSel = null;       // selected category chip: filters the list AND tags new subtasks
 let loadError = false;
+
+// Fixed palette — mid-tone on purpose so a dot reads on both the dark and the paper themes.
+const CAT_COLORS = ['#F5A524', '#4ADE80', '#60A5FA', '#F472B6', '#A78BFA', '#2DD4BF'];
+
+// The app is deployed by pushing a file, so it can go live before the SQL migration is
+// run. These flags let it notice the new tables are missing and simply do without them —
+// categories hide, history stops recording — instead of breaking adding a subtask.
+let catsOk = true;
+let daysOk = true;
 let todayWon = null;     // does today have a day_wins row? (Progresso board reads it) — null until loaded
 
 const NEST_HOLD_MS = 400; // hold this long over a row before it becomes a nest target
@@ -111,7 +122,7 @@ function unmount() {
 
 async function refresh() {
   const today = todayStr();
-  const [t, s, c, w] = await Promise.all([
+  const [t, s, c, w, g] = await Promise.all([
     db.from('tasks').select('*').order('position').order('created_at'),
     // Undated ones are the task's backlog ("quando puder"); dated ones from the last two
     // weeks cover today, tomorrow, anything planned ahead, and recent leftovers.
@@ -120,15 +131,40 @@ async function refresh() {
       .order('position').order('created_at'),
     db.from('task_completions').select('*').gte('done_on', mondayStr()),
     db.from('day_wins').select('won_on').eq('won_on', today).maybeSingle(),
+    db.from('categories').select('*').order('position').order('created_at'),
   ]);
   loadError = !!(t.error || s.error || c.error);
   if (!loadError) {
     tasks = t.data;
     subs = s.data;
     comps = c.data;
-    todayWon = !!w.data; // a missing row (not an error) means today isn't won yet
+    catsOk = !g.error;    // false until the categories migration is run — not fatal
+    cats = g.data || [];
+    todayWon = !!w.data;  // a missing row (not an error) means today isn't won yet
   }
   render();
+}
+
+// Records how much of today's plan got done, per task, so each task's page can draw a
+// green/orange/red board later. Stores the RAW NUMBERS (done/total) rather than a colour:
+// where the thresholds sit is a rendering decision, and this way it can be changed later
+// without losing history. A task with no plan and no tick writes nothing (that day stays
+// blank rather than counting as a failure).
+async function recordDay(t) {
+  if (!t || loadError || !daysOk) return;
+  const plan = subsFor(t, todayStr());
+  const done = plan.length ? plan.filter((s) => s.done).length : (status(t).doneToday ? 1 : 0);
+  const total = plan.length || 1;
+  // No plan and nothing done — he ticked it and changed his mind. Clear the day back to
+  // blank instead of leaving a stale square (a planned-but-undone day still records 0/N,
+  // which is the red case; an untouched day should record nothing at all).
+  // Recording is a background nicety: never nag him about it, just stop trying.
+  const { error } = !plan.length && !done
+    ? await db.from('task_days').delete().eq('task_id', t.id).eq('day', todayStr())
+    : await db.from('task_days').upsert(
+        { user_id: uid, task_id: t.id, day: todayStr(), done, total },
+        { onConflict: 'user_id,task_id,day' });
+  if (error) { daysOk = false; console.warn('[tasks] histórico desligado (falta a migração?)', error); }
 }
 
 // A day counts as "won" when the plate ends the day cleared AND something was actually
@@ -219,8 +255,9 @@ function heroHtml(open) {
   if (st.block) {
     const next = subsFor(t, todayStr()).find((s) => !s.done);
     const pct = Math.round((st.prog.done / st.prog.total) * 100);
+    const c = catOf(next);
     return `<div class="hero">
-      <div class="title">${esc(next.title)}</div>
+      <div class="title">${c ? `<i class="herodot" style="background:${c.color}"></i>` : ''}${esc(next.title)}</div>
       <div class="sub">Parte de: ${esc(t.title)} · ${st.prog.done + 1} de ${st.prog.total}${t.cadence === 'once' ? '' : ' hoje'}</div>
       <div class="bar"><i style="width:${pct}%"></i></div>
       <button class="btn" data-act="hero-done" data-id="${t.id}" data-sub="${next.id}">Concluir</button>
@@ -288,11 +325,21 @@ function subLeftovers(t) {
   return subs.filter((s) => s.task_id === t.id && s.for_date && s.for_date < todayStr() && !s.done);
 }
 
+function catOf(s) { return cats.find((c) => c.id === s.category_id) || null; }
+
 function subLine(s, { check = true, move = false, day = '' } = {}) {
+  const c = catOf(s);
+  // the dot doubles as the control: tapping it cycles the step through the categories
+  const dot = cats.length
+    ? `<button class="catdot" data-act="cycle-cat" data-id="${s.id}"
+         style="${c ? `background:${c.color};border-color:${c.color}` : ''}"
+         title="${c ? esc(c.name) : 'Sem categoria'}"></button>`
+    : '';
   return `<div class="subrow ${s.done ? 'sdone' : ''}">
     ${check
       ? `<button class="cb ${s.done ? 'on' : ''}" data-act="toggle-sub" data-id="${s.id}">✓</button>`
       : ''}
+    ${dot}
     <span class="st"${check ? '' : ' style="color:var(--muted)"'}>${esc(s.title)}</span>
     ${day ? `<span class="tag">${day}</span>` : ''}
     ${move ? `<button class="xbtn move" data-act="sub-to-today" data-id="${s.id}" title="Trazer para hoje">↑ hoje</button>` : ''}
@@ -319,9 +366,23 @@ function expandHtml(t, st) {
     </div>`;
   }
 
-  h += list.length
-    ? list.map((s) => subLine(s, { check: tab === 'today', move: tabbed && tab !== 'today', day: dayOf(s) })).join('')
-    : `<div class="subempty">${!tabbed ? 'Sem passos ainda.'
+  // Category chips work like the day tabs: the selected one filters the list AND is what a
+  // new step gets tagged with. "Todas" selected = show everything, tag nothing.
+  if (catsOk) h += `<div class="pills cats">
+    <button class="pill ${catSel === null ? 'on' : ''}" data-act="cat-sel" data-v="">Todas</button>
+    ${cats.map((c) => `<button class="pill cat ${catSel === c.id ? 'on' : ''}" data-act="cat-sel" data-v="${c.id}"
+        style="${catSel === c.id ? `border-color:${c.color};color:${c.color}` : ''}">
+        <i style="background:${c.color}"></i>${esc(c.name)}</button>`).join('')}
+    <button class="pill" data-act="cat-new" title="Nova categoria">+</button>
+    ${catSel !== null ? `<button class="pill danger" data-act="cat-del" data-v="${catSel}">Apagar categoria</button>` : ''}
+  </div>`;
+
+  const shown = catSel === null ? list : list.filter((s) => s.category_id === catSel);
+  h += shown.length
+    ? shown.map((s) => subLine(s, { check: tab === 'today', move: tabbed && tab !== 'today', day: dayOf(s) })).join('')
+    : `<div class="subempty">${
+        catSel !== null ? 'Nada nesta categoria.'
+        : !tabbed ? 'Sem passos ainda.'
         : tab === 'today' ? 'Nada planeado para hoje.'
         : tab === 'tomorrow' ? 'Nada para amanhã.' : 'Nada na lista.'}</div>`;
 
@@ -410,6 +471,7 @@ async function toggleTask(t) {
       else if (data) Object.assign(row, data);
     }
   }
+  await recordDay(t); // plain tick, no plan — still worth a square on the board
 }
 
 async function toggleSub(id) {
@@ -426,6 +488,7 @@ async function toggleSub(id) {
 async function syncBlock(t) {
   if (!t) return;
   const mine = subsFor(t, todayStr());
+  await recordDay(t);
   if (mine.length === 0) return;
   const allDone = mine.every((x) => x.done);
 
@@ -457,14 +520,48 @@ async function addSub(taskId, title, target = subTarget) {
     : target === 'tomorrow' ? tomorrowStr()
     : todayStr();
   const position = subs.filter((s) => s.task_id === taskId).length;
-  const { data, error } = await db.from('subtasks')
-    .insert({ user_id: uid, task_id: taskId, title, for_date, position }).select().single();
+  const row = { user_id: uid, task_id: taskId, title, for_date, position };
+  if (catsOk) row.category_id = catSel; // the column only exists after the migration
+  const { data, error } = await db.from('subtasks').insert(row).select().single();
   if (error) { toast('Não foi possível guardar. Tenta de novo.'); await refresh(); return null; }
   subs.push(data);
   render();
   // adding an unfinished step reopens a block that had been completed
   await syncBlock(t);
   return data;
+}
+
+// ---------- categories ----------
+async function newCat() {
+  const name = prompt('Nome da nova categoria:');
+  if (!name || !name.trim()) return;
+  const color = CAT_COLORS[cats.length % CAT_COLORS.length];
+  const { data, error } = await db.from('categories')
+    .insert({ user_id: uid, name: name.trim(), color, position: cats.length }).select().single();
+  if (error) { toast('Não foi possível criar a categoria.'); return; }
+  cats.push(data);
+  catSel = data.id; // land on the new one, so the next step he adds gets tagged with it
+  render();
+}
+
+async function delCat(id) {
+  const c = cats.find((x) => x.id === id);
+  if (!c || !confirm(`Apagar a categoria "${c.name}"?\n\nAs subtarefas ficam sem categoria, não são apagadas.`)) return;
+  cats = cats.filter((x) => x.id !== id);
+  subs.forEach((s) => { if (s.category_id === id) s.category_id = null; });
+  catSel = null;
+  render();
+  await save(db.from('categories').delete().eq('id', id));
+}
+
+// Tapping a step's dot walks it through the categories and back to none.
+async function cycleCat(id) {
+  const s = subs.find((x) => x.id === id);
+  if (!s || !cats.length) return;
+  const i = cats.findIndex((c) => c.id === s.category_id);
+  s.category_id = i + 1 >= cats.length ? null : cats[i + 1].id;
+  render();
+  await save(db.from('subtasks').update({ category_id: s.category_id }).eq('id', id));
 }
 
 // Pull a leftover / backlog / future subtask into today's plan.
@@ -713,7 +810,11 @@ function onClick(e) {
 
   if (act === 'retry') refresh();
   else if (act === 'sheet') openSheet();
-  else if (act === 'expand') { expandedId = expandedId === id ? null : id; subTarget = 'today'; render(); }
+  else if (act === 'expand') {
+    expandedId = expandedId === id ? null : id;
+    subTarget = 'today'; catSel = null;
+    render();
+  }
   else if (act === 'toggle-task') toggleTask(task);
   else if (act === 'toggle-sub') toggleSub(id);
   else if (act === 'sub-target') {
@@ -730,6 +831,14 @@ function onClick(e) {
     const title = input.value.trim();
     if (title) { input.value = ''; addSub(id, title); }
   }
+  else if (act === 'cat-sel') {
+    const v = btn.dataset.v || null;
+    catSel = catSel === v ? null : v; // tap the active chip again to go back to Todas
+    render();
+  }
+  else if (act === 'cat-new') newCat();
+  else if (act === 'cat-del') delCat(btn.dataset.v);
+  else if (act === 'cycle-cat') cycleCat(id);
   else if (act === 'sub-to-today') subToToday(id);
   else if (act === 'del-sub') {
     const owner = tasks.find((t) => t.id === subs.find((s) => s.id === id)?.task_id);
