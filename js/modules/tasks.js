@@ -27,6 +27,8 @@ let cats = [];
 let expandedId = null;
 let subTarget = 'today'; // which day tab: 'today' | 'tomorrow' | 'none'
 let catSel = null;       // selected category chip: filters the list AND tags new subtasks
+let pageId = null;       // open task page, or null for the Today list
+let days = [];           // task_days rows for the open page's board
 let loadError = false;
 
 // Fixed palette — mid-tone on purpose so a dot reads on both the dark and the paper themes.
@@ -98,6 +100,7 @@ async function mount(container, ctx) {
   db = ctx.supabase;
   uid = ctx.session.user.id;
   expandedId = null;
+  pageId = null; days = [];
   focusHandler = () => { if (!drag) refresh(); };
   window.addEventListener('focus', focusHandler);
   root.addEventListener('click', onClick);
@@ -158,8 +161,19 @@ async function recordDay(t) {
   // No plan and nothing done — he ticked it and changed his mind. Clear the day back to
   // blank instead of leaving a stale square (a planned-but-undone day still records 0/N,
   // which is the red case; an untouched day should record nothing at all).
+  const clear = !plan.length && !done;
+
+  // Keep the open page's board in step, so today's square reacts as he ticks.
+  if (pageId === t.id) {
+    const i = days.findIndex((d) => d.day === todayStr());
+    if (clear) { if (i >= 0) days.splice(i, 1); }
+    else if (i >= 0) Object.assign(days[i], { done, total });
+    else days.push({ task_id: t.id, day: todayStr(), done, total });
+    render();
+  }
+
   // Recording is a background nicety: never nag him about it, just stop trying.
-  const { error } = !plan.length && !done
+  const { error } = clear
     ? await db.from('task_days').delete().eq('task_id', t.id).eq('day', todayStr())
     : await db.from('task_days').upsert(
         { user_id: uid, task_id: t.id, day: todayStr(), done, total },
@@ -417,14 +431,124 @@ function rowHtml({ t, st }, isDone) {
       <button class="tmain" data-act="expand" data-id="${t.id}">
         <div class="tt">${esc(t.title)}</div>${rowMeta(t, st)}
       </button>
+      ${hasPage(t) ? `<button class="pagebtn" data-act="open-page" data-id="${t.id}" title="Abrir a página">›</button>` : ''}
       ${!isDone ? `<button class="handle" data-id="${t.id}">≡</button>` : ''}
     </div>
     ${expandedId === t.id ? expandHtml(t, st) : ''}
   </div>`;
 }
 
+// ---------- a task's own page ----------
+// Every recurring task gets one; a one-off has nothing worth a page (no cadence, no
+// history, and its steps are already the whole task). Reached with the › on its row.
+function hasPage(t) { return t.cadence === 'daily' || t.cadence === 'weekly'; }
+
+async function openPage(id) {
+  pageId = id;
+  days = [];
+  expandedId = null; subTarget = 'today'; catSel = null;
+  render();
+  window.scrollTo(0, 0);
+  if (!daysOk) return;
+  const { data, error } = await db.from('task_days').select('*')
+    .eq('task_id', id).gte('day', daysAgoStr(371));
+  if (error) { daysOk = false; console.warn('[tasks] histórico indisponível', error); }
+  else days = data;
+  render();
+}
+
+function closePage() { pageId = null; days = []; render(); }
+
+// Green = the whole plan done, orange = part of it, red = planned and did none,
+// blank = never touched that day (his call, 2026-07-26: same rule for every cadence —
+// a quiet day is just a quiet day, he'll notice it himself).
+function dayState(d) {
+  if (!d || d.total === 0) return '';
+  if (d.done >= d.total) return 'won';
+  return d.done > 0 ? 'half' : 'miss';
+}
+
+function taskBoardHtml() {
+  const byDay = new Map(days.map((d) => [d.day, d]));
+  const todayIso = todayStr();
+  const MONTHS = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+  const add = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+
+  const today = new Date();
+  const monday = (d) => { const x = new Date(d); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; };
+  const start = monday(add(today, -25 * 7)); // ~6 months, enough to see a habit forming
+  const end = add(monday(today), 6);
+
+  const columns = [];
+  let lastMonth = -1;
+  for (let day = new Date(start); day <= end; ) {
+    const cells = [];
+    let colMonth = null;
+    for (let i = 0; i < 7; i++) {
+      const key = iso(day);
+      if (colMonth === null) colMonth = day.getMonth();
+      let state = key > todayIso ? 'future' : dayState(byDay.get(key));
+      if (key === todayIso) state += ' today';
+      const d = byDay.get(key);
+      cells.push(`<i class="hm-c ${state}" title="${key}${d ? ` · ${d.done}/${d.total}` : ''}"></i>`);
+      day = add(day, 1);
+    }
+    const label = colMonth !== lastMonth ? MONTHS[colMonth] : '';
+    lastMonth = colMonth;
+    columns.push({ label, cells: cells.join('') });
+  }
+
+  const recent = [...byDay.values()].filter((d) => d.day > iso(add(today, -30)));
+  const greens = recent.filter((d) => dayState(d) === 'won').length;
+
+  return `<div class="taskboard">
+    <div class="hm-scroll"><div class="hm" style="--cols:${columns.length}">
+      <div class="hm-wd"><span>Seg</span><span>Qua</span><span>Sex</span></div>
+      <div class="hm-body">
+        <div class="hm-months">${columns.map((c) => `<span class="hm-m">${c.label}</span>`).join('')}</div>
+        <div class="hm-grid">${columns.map((c) => c.cells).join('')}</div>
+      </div>
+    </div></div>
+    <div class="hm-legend">
+      <span>${greens} ${greens === 1 ? 'dia completo' : 'dias completos'} nos últimos 30</span>
+      <span class="hm-key">
+        <i class="hm-c"></i><i class="hm-c miss"></i><i class="hm-c half"></i><i class="hm-c won"></i>
+      </span>
+    </div>
+  </div>`;
+}
+
+function pageHtml(t) {
+  const st = status(t);
+  let sub = t.cadence === 'daily' ? 'Todos os dias'
+    : (t.quota || 1) > 1 ? `${st.count} de ${t.quota} esta semana` : '1× por semana';
+  if (st.block) sub += ` · ${st.prog.done}/${st.prog.total} hoje`;
+
+  return `
+    <div class="pagehead">
+      <button class="backbtn" data-act="close-page">‹</button>
+      <div>
+        <h1>${esc(t.title)}</h1>
+        <div class="date">${sub}</div>
+      </div>
+    </div>
+    <div class="kicker">Passos</div>
+    <div class="pagepanel">${expandHtml(t, st)}</div>
+    <div class="kicker plain">Constância</div>
+    ${daysOk ? taskBoardHtml()
+      : '<p class="empty">O histórico ainda não está ligado — falta correr a migração no Supabase.</p>'}
+  `;
+}
+
 function render() {
   if (!root || drag) return; // never rebuild the DOM under a finger mid-drag
+
+  if (pageId) {
+    const t = tasks.find((x) => x.id === pageId);
+    if (!t) { pageId = null; }           // deleted from under us
+    else { root.innerHTML = pageHtml(t); return; }
+  }
+
   const { open, done } = visibleLists();
   const h = new Date().getHours();
   const greet = h < 12 ? 'Bom dia.' : h < 20 ? 'Boa tarde.' : 'Boa noite.';
@@ -809,6 +933,8 @@ function onClick(e) {
   const task = id ? tasks.find((t) => t.id === id) : null;
 
   if (act === 'retry') refresh();
+  else if (act === 'open-page') openPage(id);
+  else if (act === 'close-page') closePage();
   else if (act === 'sheet') openSheet();
   else if (act === 'expand') {
     expandedId = expandedId === id ? null : id;

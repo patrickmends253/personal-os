@@ -21,6 +21,7 @@
       --accent: #F5A524;
       --accent-ink: #1A1200;
       --ok: #4ADE80;
+      --warn: #F5A524;
       --off: #F87171;
       color-scheme: dark;
     }
@@ -35,6 +36,7 @@
       --accent: #BC5A2C;
       --accent-ink: #FFF6EF;
       --ok: #15803D;
+      --warn: #D97706;
       --off: #B91C1C;
       color-scheme: light;
     }
@@ -49,6 +51,7 @@
       --accent: #0F8A66;
       --accent-ink: #F0FBF7;
       --ok: #15803D;
+      --warn: #D97706;
       --off: #B91C1C;
       color-scheme: light;
     }
@@ -263,6 +266,21 @@
       background: none; border: 1.5px dashed var(--muted); opacity: 0.85;
     }
     .herodot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
+
+    /* ---- a task's own page ---- */
+    .pagebtn {
+      background: none; border: none; color: var(--muted); font-size: 1.35rem; line-height: 1;
+      padding: 10px 4px; flex: none; opacity: 0.6;
+    }
+    .pagehead { display: flex; align-items: flex-start; gap: 6px; margin-top: 22px; }
+    .pagehead h1 { font-size: clamp(1.5rem, 6.5vw, 2rem); font-weight: 650; letter-spacing: -0.02em; line-height: 1.15; }
+    .pagehead .date { color: var(--muted); font-size: 0.9rem; margin-top: 5px; }
+    .backbtn {
+      background: none; border: 1px solid var(--line); color: var(--text);
+      border-radius: 10px; font-size: 1.2rem; line-height: 1; padding: 6px 12px;
+      flex: none; margin-top: 2px;
+    }
+    .pagepanel .expand { padding: 0 0 4px; }
     .addsub { display: flex; gap: 8px; align-items: center; }
     .addsub .field { padding: 9px 12px; font-size: 0.9rem; border-radius: 10px; flex: 1; }
     .pill {
@@ -311,6 +329,10 @@
     }
     .hm-c { width: 12px; height: 12px; border-radius: 3px; background: var(--line); }
     .hm-c.won { background: var(--accent); }
+    /* per-task board: whole plan done / part of it / planned and did none */
+    .taskboard .hm-c.won { background: var(--ok); }
+    .hm-c.half { background: var(--warn); }
+    .hm-c.miss { background: var(--off); opacity: 0.65; }
     .hm-c.future { background: transparent; }
     .hm-c.today { box-shadow: 0 0 0 1.5px var(--accent); }
     .hm-c.won.today { box-shadow: 0 0 0 1.5px var(--text); }
