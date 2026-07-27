@@ -417,7 +417,11 @@ function expandHtml(t, st) {
     <button class="pill" data-act="cat-new" data-id="${t.id}" title="Nova categoria">+ categoria</button>
   </div>`;
 
-  const shown = catSel === null ? list : list.filter((s) => s.category_id === catSel);
+  // Ticked steps sink to the bottom of their list (his ask, 2026-07-27) — the top of the
+  // list is always what's left. Display order only: `position` is untouched, so unticking
+  // a step puts it back exactly where it was. sort() is stable, so the rest keeps its order.
+  const shown = (catSel === null ? list : list.filter((s) => s.category_id === catSel))
+    .slice().sort((a, b) => (a.done === b.done ? 0 : a.done ? 1 : -1));
   h += shown.length
     ? shown.map((s) => subLine(s, { check: tab === 'today', move: tabbed && tab !== 'today', day: dayOf(s) })).join('')
     : `<div class="subempty">${
